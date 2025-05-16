@@ -1,6 +1,12 @@
 import multiprocessing
 from pathlib import Path
 
+# ─── PyTorch Imports ───────────────────────────────────────────────────────
+import torch                                # import PyTorch core
+import torch.nn as nn                       # import neural network modules
+import torch.optim as optim                 # import optimizers
+from torch.utils.data import DataLoader, TensorDataset
+
 import argparse
 import sys
 import time
@@ -114,6 +120,7 @@ def create_model(architecture, extend_model, output_layer_size, max_train_len):
         return model
     
     # Create new model based on architecture
+    """
     if architecture == "FFNN":
         model = tf.keras.Sequential()
         model.add(tf.keras.layers.Input(shape=(input_layer_size,)))
@@ -122,6 +129,39 @@ def create_model(architecture, extend_model, output_layer_size, max_train_len):
         model.add(tf.keras.layers.Dense(output_layer_size, activation='softmax'))
         model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy", 
                     metrics=["accuracy", SparseTopKCategoricalAccuracy(k=3, name="k3_accuracy")])
+        return model
+    """
+    if architecture == "FFNN":
+        # Define a PyTorch Feed-Forward Neural Network
+        class FFNN(nn.Module):
+            def __init__(self, input_size, hidden_size, num_hidden_layers, output_size):
+                super(FFNN, self).__init__()
+                layers = []
+
+                # input layer
+                layers.append(nn.Linear(input_size, hidden_size))
+                layers.append(nn.ReLU())
+
+                # hidden layers
+                for _ in range(num_hidden_layers - 1):
+                    layers.append(nn.Linear(hidden_size, hidden_size))
+                    layers.append(nn.ReLU())
+
+                # output layer (no softmax; I use CrossEntropyLoss that includes log-softmax)
+                layers.append(nn.Linear(hidden_size, output_size))
+                self.network = nn.Sequential(*layers)
+
+            def forward(self, x):
+                # forward pass through the MLP
+                return self.network(x)
+
+        # instantiate the model
+        model = FFNN(
+            input_size=input_layer_size,
+            hidden_size=hidden_layer_size,
+            num_hidden_layers=config.hidden_layers,
+            output_size=output_layer_size
+        )
         return model
     
     elif architecture == "CNN":
