@@ -6,6 +6,8 @@ import torch                                # import PyTorch core
 import torch.nn as nn                       # import neural network modules
 import torch.optim as optim                 # import optimizers
 from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import tensorflow as tf
 
 import argparse
 import sys
@@ -23,6 +25,7 @@ from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 from datetime import datetime
 
@@ -68,7 +71,11 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
                 extend_model = tf.keras.models.load_model(extend_model, compile=False)
             model = create_model(architecture, extend_model, output_layer_size, max_train_len)
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            model.summary()
+        # Keras models have .summary(), PyTorch ones don’t
+            if hasattr(model, "summary"):
+                model.summary()                          # Keras: print structure
+            else:
+                print(model)                             # PyTorch: print via __repr__
     else:
         print("Only one GPU found.")
         strategy = NullDistributionStrategy()
@@ -76,7 +83,11 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
             extend_model = tf.keras.models.load_model(extend_model, compile=False)
         model = create_model(architecture, extend_model, output_layer_size, max_train_len)
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            model.summary()
+        # Keras models have .summary(), PyTorch ones don’t
+            if hasattr(model, "summary"):
+                model.summary()                          # Keras: print structure
+            else:
+                print(model)                             # PyTorch: print via __repr__
 
     print('Model created.\n')
     return model, strategy
@@ -684,6 +695,104 @@ def train_model(model, strategy, args, train_ds):
 
     print('Training model...')
 
+
+    # ─── PyTorch branch for FFNN only ───────────────────────────────────────────
+
+    if args.architecture == "FFNN":
+        # Initialize variables for FFNN
+        start_time = time.time()
+
+        # move model to GPU if available
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+
+        # gather all batches until max_iter
+        stats_list, labels_list = [], []
+        while train_ds.iteration < args.max_iter:
+            for batch in next(train_ds):
+                stats, labs = batch.items()
+                stats_list.append(stats.numpy())
+                labels_list.append(labs.numpy())
+                print(f"Loaded {train_ds.iteration} samples.")  # status log
+        train_ds.stop_outstanding_tasks()
+
+        # concatenate into single arrays
+        stats_arr = np.concatenate(stats_list, axis=0)
+        labels_arr = np.concatenate(labels_list, axis=0)
+
+        # split train / validation
+        train_stats, val_stats, train_labels, val_labels = train_test_split(
+            stats_arr, labels_arr, test_size=0.3, random_state=42
+        )
+
+        # to torch tensors
+        train_tensor = torch.tensor(train_stats, dtype=torch.float32)
+        train_labels_tensor = torch.tensor(train_labels, dtype=torch.long)
+        val_tensor = torch.tensor(val_stats, dtype=torch.float32)
+        val_labels_tensor = torch.tensor(val_labels, dtype=torch.long)
+
+        # dataloaders
+        train_loader = DataLoader(
+            TensorDataset(train_tensor, train_labels_tensor),
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.dataset_workers
+        )
+        val_loader = DataLoader(
+            TensorDataset(val_tensor, val_labels_tensor),
+            batch_size=args.batch_size, shuffle=False,
+            num_workers=args.dataset_workers
+        )
+
+        # optimizer & loss
+        optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+        criterion = nn.CrossEntropyLoss()
+
+        # training loop
+        for epoch in range(args.epochs):
+            model.train()
+            running_loss = 0.0
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                optimizer.zero_grad()                  # zero gradients
+                outputs = model(X_batch)              # forward pass
+                loss = criterion(outputs, y_batch)    # compute loss
+                loss.backward()                       # backward pass
+                optimizer.step()                      # update weights
+                running_loss += loss.item()
+
+            # compute average loss and validation accuracy
+            avg_loss = running_loss / len(train_loader)
+            model.eval()
+            correct, total = 0, 0
+            with torch.no_grad():
+                for X_val, y_val in val_loader:
+                    X_val, y_val = X_val.to(device), y_val.to(device)
+                    preds = model(X_val).argmax(dim=1)
+                    correct += (preds == y_val).sum().item()
+                    total += y_val.size(0)
+            val_acc = correct / total
+            print(f"Epoch {epoch+1}/{args.epochs}, Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}")
+
+        # print elapsed time
+        elapsed = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
+        stats_str = (
+            f"Finished PyTorch FFNN in {elapsed.days}d {elapsed.seconds//3600}h "
+            f"{(elapsed.seconds//60)%60}m {elapsed.seconds%60}s "
+            f"with {train_ds.iteration} samples and {args.epochs} epochs.\n"
+        )
+        print(stats_str)
+
+        # create a dummy callback so downstream code can always check .stop_training
+        class DummyCallback:
+            def __init__(self):
+                self.stop_training = False
+
+        dummy_cb = DummyCallback()
+        # return with a dummy callback instead of None
+        return dummy_cb, train_ds.iteration, stats_str
+    # ───────────────────────────────────────────────────────────────────────────────
+
+
     delete_previous_checkpoints()
 
     # Create callbacks for tensorflow models
@@ -863,7 +972,18 @@ def save_model(model, args):
     model_path = os.path.join(args.save_directory, model_name)
 
     if architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
-        model.save(model_path)
+        # Keras models have .save(); PyTorch nn.Module ones don't
+        if hasattr(model, "save"):
+            # Keras: save the full model (architecture + weights + optimizer state)
+            model.save(model_path)
+            print(f"Saved Keras model to {model_path}")
+        elif isinstance(model, torch.nn.Module):
+            # PyTorch: save only the state_dict
+            torch.save(model.state_dict(), model_path + ".pt")
+            print(f"Saved PyTorch model state_dict to {model_path}.pt")
+        else:
+            # Fallback for unexpected types
+            raise ValueError(f"Cannot save model of type {type(model)}")
 
     elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN", "SVM-Rotor"):
         with open(model_path, "wb") as f:
@@ -1010,7 +1130,34 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 prediction_metrics["SVM"].add_predictions(labels, model[3].predict_proba(statistics))
                 prediction_metrics["kNN"].add_predictions(labels, model[4].predict_proba(statistics))
             else:
-                prediction = model.predict(statistics, batch_size=args.batch_size, verbose=1)
+                # ─── Branch prediction: Keras vs PyTorch ───────────────────────────────────
+                if hasattr(model, "predict"):
+                    # Keras: can call .predict() directly
+                    prediction = model.predict(statistics,
+                                            batch_size=args.batch_size,
+                                            verbose=1)
+                else:
+                    # select device and move model there
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    model.to(device)
+                    model.eval()  # set eval mode (disables dropout, etc.)
+
+                    # convert TensorFlow tensor (or any array-like) to a NumPy array first,
+                    # then to a PyTorch tensor on the right device
+                    if isinstance(statistics, tf.Tensor):
+                        np_inputs = statistics.numpy()
+                    else:
+                        # fallback for plain lists/NumPy arrays
+                        np_inputs = np.array(statistics)
+                    inputs = torch.tensor(np_inputs, dtype=torch.float32).to(device)
+                    
+                    with torch.no_grad():               # no grad for inference
+                        outputs = model(inputs)         # forward pass
+                    # take the index of the max logit as the predicted class
+                    prediction = outputs.argmax(dim=1)  # Tensor of shape (N,)
+                    # move back to CPU and to NumPy array
+                    prediction = prediction.cpu().numpy()
+
                 prediction_metrics[architecture].add_predictions(labels, prediction)
 
             total_len_prediction += len(prediction)
