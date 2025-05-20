@@ -980,8 +980,8 @@ def save_model(model, args):
             print(f"Saved Keras model to {model_path}")
         elif isinstance(model, torch.nn.Module):
             # PyTorch: save only the state_dict
-            torch.save(model.state_dict(), model_path + ".pt")
-            print(f"Saved PyTorch model state_dict to {model_path}.pt")
+            torch.save(model.state_dict(), model_path + ".pth")
+            print(f"Saved PyTorch model state_dict to {model_path}.pth")
         else:
             # Fallback for unexpected types
             raise ValueError(f"Cannot save model of type {type(model)}")
