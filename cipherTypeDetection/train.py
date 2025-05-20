@@ -8,6 +8,7 @@ import torch.optim as optim                 # import optimizers
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import tensorflow as tf
+from torchinfo import summary
 
 import argparse
 import sys
@@ -83,11 +84,11 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
             extend_model = tf.keras.models.load_model(extend_model, compile=False)
         model = create_model(architecture, extend_model, output_layer_size, max_train_len)
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-        # Keras models have .summary(), PyTorch ones don’t
+        # Keras models have .summary(), PyTorch ones don’t. Use torchinfo or torchsummary
             if hasattr(model, "summary"):
-                model.summary()                          # Keras: print structure
+                model.summary()
             else:
-                print(model)                             # PyTorch: print via __repr__
+                summary(model, input_size=(1, 724))
 
     print('Model created.\n')
     return model, strategy
