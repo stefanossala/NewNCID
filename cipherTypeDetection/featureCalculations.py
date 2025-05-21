@@ -359,7 +359,7 @@ var columnar_calcs = function(){
         var i,j,k;
         var max,sum;
         var index,dif,long_corr,short_corr;
-        max = 0;
+        max = -1;
 
         for (j= col;j<key_len;j++) {
         long_corr = short_corr = 0;
