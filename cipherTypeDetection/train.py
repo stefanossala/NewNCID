@@ -74,9 +74,9 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
         # Keras models have .summary(), PyTorch ones don’t
             if hasattr(model, "summary"):
-                model.summary()                          # Keras: print structure
+                model.summary()
             else:
-                print(model)                             # PyTorch: print via __repr__
+                summary(model, input_size=(1, 724))
     else:
         print("Only one GPU found.")
         strategy = NullDistributionStrategy()
@@ -696,6 +696,7 @@ def train_model(model, strategy, args, train_ds):
 
     print('Training model...')
 
+    delete_previous_checkpoints()
 
     # ─── PyTorch branch for FFNN only ───────────────────────────────────────────
 
@@ -793,8 +794,6 @@ def train_model(model, strategy, args, train_ds):
         return dummy_cb, train_ds.iteration, stats_str
     # ───────────────────────────────────────────────────────────────────────────────
 
-
-    delete_previous_checkpoints()
 
     # Create callbacks for tensorflow models
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir='../data/logs', 
