@@ -113,6 +113,7 @@ def predict_torch_ffnn(model, test_ds, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     model.to(device)
+    criterion = nn.CrossEntropyLoss()
     all_preds = []
     all_labels = []
     with torch.no_grad():
@@ -123,6 +124,7 @@ def predict_torch_ffnn(model, test_ds, args):
                 x = torch.tensor(statistics.numpy(), dtype=torch.float32).to(device)
                 y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
                 outputs = model(x)
+                loss = criterion(outputs, y)
                 preds = torch.softmax(outputs, dim=1).cpu().numpy()
                 all_preds.append(preds)
                 all_labels.append(labels.numpy())
@@ -906,51 +908,56 @@ def train_model(model, strategy, args, train_ds):
         
 def save_model(model, args):
     """Writes the model and the commandline arguments to disk."""
-
     print('Saving model...')
     architecture = args.architecture
+
     if not os.path.exists(args.save_directory):
         os.mkdir(args.save_directory)
+
+    # Gestione nome modello
     if args.model_name == 'm.h5':
         i = 1
-        while os.path.exists(os.path.join(args.save_directory, args.model_name.split('.')[0] + str(i) + '.h5')):
+        base_name = args.model_name.split('.')[0]
+        extension = '.pth' if architecture == "FFNN" else '.h5'
+        while os.path.exists(os.path.join(args.save_directory, base_name + str(i) + extension)):
             i += 1
-        model_name = args.model_name.split('.')[0] + str(i) + '.h5'
+        model_name = base_name + str(i) + extension
     else:
         model_name = args.model_name
+        # per FFNN forziamo il cambio estensione
+        if architecture == "FFNN":
+            model_name = model_name.replace('.h5', '.pth')
+
     model_path = os.path.join(args.save_directory, model_name)
 
+    # Salvataggio modello
     if architecture == "FFNN":
         if isinstance(model, TorchFFNN):
-            torch.save(model.state_dict(), model_path.replace('.h5', '.pth'))
-    
+            torch.save(model.state_dict(), model_path)
+
     elif architecture in ("CNN", "LSTM", "Transformer"):
         model.save(model_path)
 
     elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN", "SVM-Rotor"):
         with open(model_path, "wb") as f:
-            # this gets very large
             pickle.dump(model, f)
 
     elif architecture == "[FFNN,NB]":
         model[0].save('../data/models/' + model_path.split('.')[0] + "_ffnn.h5")
         with open('../data/models/' + model_path.split('.')[0] + "_nb.h5", "wb") as f:
-            # this gets very large
             pickle.dump(model[1], f)
 
     elif architecture == "[DT,ET,RF,SVM,kNN]":
-        for index, name in enumerate(["dt","et","rf","svm","knn"]):
-            # TODO: Are these files actually in the h5 format? Probably not!
+        for index, name in enumerate(["dt", "et", "rf", "svm", "knn"]):
             with open('../data/models/' + model_path.split('.')[0] + f"_{name}.h5", "wb") as f:
-                # this gets very large
                 pickle.dump(model[index], f)
 
-    # Write user provided commandline arguments into mode path
+    # Salvataggio parametri
     with open('../data/' + model_path.split('.')[0] + '_parameters.txt', 'w') as f:
         for arg in vars(args):
             f.write("{:23s}= {:s}\n".format(arg, str(getattr(args, arg))))
 
-    # Remove logs of previous run
+    # Gestione logs
     if architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
         logs_destination = '../data/' + model_name.split('.')[0] + '_tensorboard_logs'
         try:
@@ -958,14 +965,12 @@ def save_model(model, args):
                 if os.path.exists(logs_destination):
                     shutil.rmtree(logs_destination)
                 shutil.move('../data/logs', logs_destination)
-            else:
-                print("No logs to move from '../data/logs'.")
-            
         except Exception:
-            print(f"Could not remove logs of previous run. Move of current logs "
-                  f"from '../data/logs' to '{logs_destination}' failed.")
-            
+            print(f"Could not move logs from '../data/logs' to '{logs_destination}'.")
+
     print('Model saved.\n')
+
+
 
 def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter):
     """
