@@ -924,16 +924,21 @@ def save_model(model, args):
         model_name = base_name + str(i) + extension
     else:
         model_name = args.model_name
-        # per FFNN forziamo il cambio estensione
         if architecture == "FFNN":
             model_name = model_name.replace('.h5', '.pth')
 
     model_path = os.path.join(args.save_directory, model_name)
 
-    # Salvataggio modello
     if architecture == "FFNN":
         if isinstance(model, TorchFFNN):
-            torch.save(model.state_dict(), model_path)
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'input_size': model.input_size,
+                'hidden_size': model.hidden_size,
+                'output_size': model.output_size,
+                'num_hidden_layers': model.num_hidden_layers
+            }, model_path)
+
 
     elif architecture in ("CNN", "LSTM", "Transformer"):
         model.save(model_path)
