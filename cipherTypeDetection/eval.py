@@ -9,6 +9,10 @@ import functools
 import numpy as np
 from datetime import datetime
 
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+
 # This environ variable must be set before all tensorflow imports!
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
@@ -133,8 +137,24 @@ def benchmark(args, model, architecture):
             statistics, labels, ciphertexts = batch.items()
 
             if architecture == "FFNN":
-                results.append(model.evaluate(statistics, labels, batch_size=args.batch_size, verbose=1))
-            if architecture in ("CNN", "LSTM", "Transformer"):
+                if hasattr(model, "evaluate"):  # Keras model
+                    results.append(model.evaluate(statistics, labels, batch_size=args.batch_size, verbose=1))
+                else:  # PyTorch model
+                    x = torch.tensor(statistics.numpy(), dtype=torch.float32)
+                    y = torch.tensor(labels.numpy(), dtype=torch.long)
+                    with torch.no_grad():
+                        outputs = model(x)
+                        loss = F.cross_entropy(outputs, y)
+                        top1 = torch.argmax(outputs, dim=1)
+                        acc = (top1 == y).float().mean()
+
+                        # Calc top-3
+                        top3 = torch.topk(outputs, k=3, dim=1).indices  # shape: (batch_size, 3)
+                        y_expanded = y.unsqueeze(1).expand_as(top3)     # shape: (batch_size, 3)
+                        k3_acc = (top3 == y_expanded).any(dim=1).float().mean()
+                        results.append((loss.item(), acc.item(), k3_acc.item()))
+
+            elif architecture in ("CNN", "LSTM", "Transformer"):
                 results.append(model.evaluate(ciphertexts, labels, batch_size=args.batch_size, verbose=1))
             elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
                 results.append(model.score(statistics, labels))
@@ -399,7 +419,26 @@ def load_model(architecture, args, model_path, cipher_types):
     
     model = None
 
-    if architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
+    if architecture == "FFNN" and model_path.endswith(".pth"):
+        from cipherTypeDetection.train import TorchFFNN
+
+        checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
+
+        model = TorchFFNN(
+            input_size=checkpoint['input_size'],
+            hidden_size=checkpoint['hidden_size'],
+            output_size=checkpoint['output_size'],
+            num_hidden_layers=checkpoint['num_hidden_layers']
+        )
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+
+        config.FEATURE_ENGINEERING = True
+        config.PAD_INPUT = False
+
+        return model
+
+    elif architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
         if architecture == 'Transformer':
             if not hasattr(config, "maxlen"):
                 raise ValueError("maxlen must be defined in the config when loading a Transformer model!")
@@ -431,12 +470,23 @@ def load_model(architecture, args, model_path, cipher_types):
     else:
         raise ValueError("Unknown architecture: %s" % architecture)
     
-    rotor_only_model_path = args.rotor_only_model
-    with open(rotor_only_model_path, "rb") as f:
-        rotor_only_model = pickle.load(f)
+    # Controlla se ci sono cifrari rotor tra quelli richiesti
+    has_rotor_ciphers = any(c in config.ROTOR_CIPHER_TYPES for c in cipher_types)
 
-    # Embed all models in RotorDifferentiationEnsemble to improve recognition of rotor ciphers
-    return RotorDifferentiationEnsemble(architecture, model, rotor_only_model)
+    # Se ci sono cifrari rotor, carica anche il modello rotor_only
+    if has_rotor_ciphers:
+        rotor_only_model_path = args.rotor_only_model
+        if not os.path.exists(rotor_only_model_path):
+            raise FileNotFoundError(f"Rotor-only model is required but not found at {rotor_only_model_path}")
+        with open(rotor_only_model_path, "rb") as f:
+            rotor_only_model = pickle.load(f)
+        return RotorDifferentiationEnsemble(architecture, model, rotor_only_model)
+
+    # Se non ci sono cifrari rotor:
+    # - se è un ensemble, restituisci direttamente l'ensemble
+    # - altrimenti restituisci il modello normale
+    return model
+
 
 def expand_cipher_groups(cipher_types):
     """Turn cipher group identifiers (ACA, MTC3) into a list of their ciphers"""
@@ -573,8 +623,8 @@ def main():
     for arg in vars(args):
         print("{:23s}= {:s}".format(arg, str(getattr(args, arg))))
     m = os.path.splitext(args.model)
-    if len(os.path.splitext(args.model)) != 2 or os.path.splitext(args.model)[1] != '.h5':
-        print('ERROR: The model name must have the ".h5" extension!', file=sys.stderr)
+    if os.path.splitext(args.model)[1] not in ('.h5', '.pth'):
+        print('ERROR: The model must have extension ".h5" (for Keras) or ".pth" (for PyTorch FFNN).', file=sys.stderr)
         sys.exit(1)
 
     architecture = args.architecture
@@ -613,7 +663,7 @@ def main():
     print("Model Loaded.")
 
     # Model is now always an ensemble
-    architecture = "Ensemble"
+    #architecture = "Ensemble"
 
     # the program was started as in benchmark mode.
     if args.download_dataset is not None:

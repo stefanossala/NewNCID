@@ -51,6 +51,13 @@ for device in tf.config.list_physical_devices('GPU'):
 class TorchFFNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_hidden_layers):
         super().__init__()
+
+        # saves parameters so that they can be saved and loaded later
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.num_hidden_layers = num_hidden_layers
+
         layers = [nn.Linear(input_size, hidden_size), nn.ReLU()]
         for _ in range(num_hidden_layers - 1):
             layers += [nn.Linear(hidden_size, hidden_size), nn.ReLU()]
@@ -59,6 +66,7 @@ class TorchFFNN(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
     
 def train_torch_ffnn(model, args, train_ds):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1188,8 +1196,8 @@ def main():
     extend_model = args.extend_model
 
     # Validate inputs
-    if len(os.path.splitext(args.model_name)) != 2 or os.path.splitext(args.model_name)[1] != '.h5':
-        print('ERROR: The model name must have the ".h5" extension!', file=sys.stderr)
+    if os.path.splitext(args.model_name)[1] not in ('.h5', '.pth'):
+        print('ERROR: The model must have extension ".h5" (for Keras) or ".pth" (for PyTorch FFNN).', file=sys.stderr)
         sys.exit(1)
 
     if extend_model is not None:
