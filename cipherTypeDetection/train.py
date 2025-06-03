@@ -69,53 +69,100 @@ class TorchFFNN(nn.Module):
 
     
 def train_torch_ffnn(model, args, train_ds):
+    import numpy as np
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=config.learning_rate,
+        betas=(config.beta_1, config.beta_2),
+        eps=config.epsilon,
+        amsgrad=config.amsgrad
+    )
     criterion = nn.CrossEntropyLoss()
     model.train()
+
+    best_val_acc = 0
+    patience_counter = 0
+    patience_limit = 5
+
     train_iter = 0
     train_epoch = 0
     start_time = time.time()
-    should_create_validation_data = True
 
     for epoch in range(args.epochs):
-        #train_ds.iteration = 0
         while train_ds.iteration < args.max_iter:
             training_batches = next(train_ds)
             for training_batch in training_batches:
                 statistics, labels = training_batch.items()
-                x = torch.tensor(statistics.numpy(), dtype=torch.float32).to(device)
-                y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
+                stats_np = statistics.numpy()
+                labels_np = labels.numpy()
+
+                # --- Normalize the input features ---
+                mean = stats_np.mean(axis=0)
+                std = stats_np.std(axis=0) + 1e-8
+                stats_np = (stats_np - mean) / std
+
+                # --- Split into train/val ---
+                x_train, x_val, y_train, y_val = train_test_split(stats_np, labels_np, test_size=0.3)
+
+                x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
+                y_train = torch.tensor(y_train, dtype=torch.long).to(device)
+                x_val = torch.tensor(x_val, dtype=torch.float32).to(device)
+                y_val = torch.tensor(y_val, dtype=torch.long).to(device)
+
+                # --- Training step ---
                 optimizer.zero_grad()
-                outputs = model(x)
-                loss = criterion(outputs, y)
+                outputs = model(x_train)
+                loss = criterion(outputs, y_train)
                 loss.backward()
                 optimizer.step()
-                train_iter += len(y)
+
+                train_iter += len(y_train)
+
+                # --- Validation step ---
+                model.eval()
+                with torch.no_grad():
+                    val_outputs = model(x_val)
+                    val_loss = criterion(val_outputs, y_val)
+                    val_pred = torch.argmax(val_outputs, dim=1)
+                    val_acc = (val_pred == y_val).float().mean().item()
+
+                    # top-3 accuracy
+                    top3 = torch.topk(val_outputs, k=3, dim=1).indices
+                    y_val_exp = y_val.unsqueeze(1).expand_as(top3)
+                    val_k3 = (top3 == y_val_exp).any(dim=1).float().mean().item()
+
+                print(f"Epoch: {epoch+1}, Iteration: {train_iter}, "
+                      f"Train Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}, "
+                      f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
+                model.train()
+
+                # --- Early stopping check ---
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience_limit:
+                        print("Early stopping triggered.")
+                        elapsed = time.time() - start_time
+                        print(f"Training time: {elapsed:.2f} seconds.")
+                        class DummyEarlyStopping: stop_training = True
+                        return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
+
                 if train_iter >= args.max_iter:
                     break
             if train_iter >= args.max_iter:
                 break
         train_epoch += 1
-        print(f"Epoch: {train_epoch}, Iteration: {train_iter}, Loss: {loss.item():.4f}")
-        if train_iter >= args.max_iter:
-            break
 
-    elapsed_training_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
-    training_stats = ("Finished training in %d days %d hours %d minutes %d seconds "
-                      "with %d iterations and %d epochs.\n" 
-                      % (elapsed_training_time.days, 
-                         elapsed_training_time.seconds // 3600, 
-                         (elapsed_training_time.seconds // 60) % 60,
-                         elapsed_training_time.seconds % 60, 
-                         train_iter, 
-                         train_epoch))
-    print(training_stats)
-    # Return dummy early_stopping_callback for compatibility
-    class DummyEarlyStopping:
-        stop_training = False
-    return DummyEarlyStopping(), train_iter, training_stats
+    elapsed = time.time() - start_time
+    print(f"Finished training in {elapsed:.2f} seconds with {train_iter} iterations.")
+    class DummyEarlyStopping: stop_training = False
+    return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
+
 
 def predict_torch_ffnn(model, test_ds, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
