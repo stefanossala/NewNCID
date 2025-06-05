@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchinfo import summary
+import numpy as np
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -67,9 +68,7 @@ class TorchFFNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-    
 def train_torch_ffnn(model, args, train_ds):
-    import numpy as np
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -85,7 +84,7 @@ def train_torch_ffnn(model, args, train_ds):
 
     best_val_acc = 0
     patience_counter = 0
-    patience_limit = 5
+    patience_limit = 250
 
     train_iter = 0
     train_epoch = 0
@@ -98,11 +97,6 @@ def train_torch_ffnn(model, args, train_ds):
                 statistics, labels = training_batch.items()
                 stats_np = statistics.numpy()
                 labels_np = labels.numpy()
-
-                # --- Normalize the input features ---
-                mean = stats_np.mean(axis=0)
-                std = stats_np.std(axis=0) + 1e-8
-                stats_np = (stats_np - mean) / std
 
                 # --- Split into train/val ---
                 x_train, x_val, y_train, y_val = train_test_split(stats_np, labels_np, test_size=0.3)
@@ -148,7 +142,8 @@ def train_torch_ffnn(model, args, train_ds):
                     if patience_counter >= patience_limit:
                         print("Early stopping triggered.")
                         elapsed = time.time() - start_time
-                        print(f"Training time: {elapsed:.2f} seconds.")
+                        t = time.gmtime(elapsed)
+                        print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
                         class DummyEarlyStopping: stop_training = True
                         return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
 
@@ -159,7 +154,8 @@ def train_torch_ffnn(model, args, train_ds):
         train_epoch += 1
 
     elapsed = time.time() - start_time
-    print(f"Finished training in {elapsed:.2f} seconds with {train_iter} iterations.")
+    t = time.gmtime(elapsed)
+    print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
     class DummyEarlyStopping: stop_training = False
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
 
@@ -184,7 +180,7 @@ def predict_torch_ffnn(model, test_ds, args):
                 all_preds.append(preds)
                 all_labels.append(labels.numpy())
     # Concatenate all predictions and labels
-    import numpy as np
+
     all_preds = np.concatenate(all_preds, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
     return all_preds, all_labels
