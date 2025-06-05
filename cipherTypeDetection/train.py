@@ -90,6 +90,10 @@ def train_torch_ffnn(model, args, train_ds):
     train_epoch = 0
     start_time = time.time()
 
+    # Variabales for validation data
+    val_data_created = False
+    x_val = y_val = None
+
     for epoch in range(args.epochs):
         while train_ds.iteration < args.max_iter:
             training_batches = next(train_ds)
@@ -98,13 +102,20 @@ def train_torch_ffnn(model, args, train_ds):
                 stats_np = statistics.numpy()
                 labels_np = labels.numpy()
 
-                # --- Split into train/val ---
-                x_train, x_val, y_train, y_val = train_test_split(stats_np, labels_np, test_size=0.3)
+                if not val_data_created:
+                    # Initial split: 70% train, 30% validation
+                    x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(
+                        stats_np, labels_np, test_size=0.3
+                    )
+                    x_val = torch.tensor(x_val_np, dtype=torch.float32).to(device)
+                    y_val = torch.tensor(y_val_np, dtype=torch.long).to(device)
+                    val_data_created = True
+                else:
+                    x_train_np = stats_np
+                    y_train_np = labels_np
 
-                x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
-                y_train = torch.tensor(y_train, dtype=torch.long).to(device)
-                x_val = torch.tensor(x_val, dtype=torch.float32).to(device)
-                y_val = torch.tensor(y_val, dtype=torch.long).to(device)
+                x_train = torch.tensor(x_train_np, dtype=torch.float32).to(device)
+                y_train = torch.tensor(y_train_np, dtype=torch.long).to(device)
 
                 # --- Training step ---
                 optimizer.zero_grad()
@@ -158,6 +169,7 @@ def train_torch_ffnn(model, args, train_ds):
     print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
     class DummyEarlyStopping: stop_training = False
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
+
 
 
 def predict_torch_ffnn(model, test_ds, args):
