@@ -94,6 +94,9 @@ def train_torch_ffnn(model, args, train_ds):
     val_data_created = False
     x_val = y_val = None
 
+    saved_mean = None
+    saved_std = None
+
     for epoch in range(args.epochs):
         while train_ds.iteration < args.max_iter:
             training_batches = next(train_ds)
@@ -101,6 +104,17 @@ def train_torch_ffnn(model, args, train_ds):
                 statistics, labels = training_batch.items()
                 stats_np = statistics.numpy()
                 labels_np = labels.numpy()
+
+                # Normalization per batch → calculate mean and std for first batch
+                # and use them for all following batches.
+                if saved_mean is None or saved_std is None:
+                    mean = stats_np.mean(axis=0)
+                    std = stats_np.std(axis=0) + 1e-8
+                    saved_mean = mean.copy()
+                    saved_std = std.copy()
+                else:
+                    mean = saved_mean
+                    std = saved_std
 
                 if not val_data_created:
                     # Initial split: 70% train, 30% validation
@@ -177,25 +191,46 @@ def predict_torch_ffnn(model, test_ds, args):
     model.eval()
     model.to(device)
     criterion = nn.CrossEntropyLoss()
+
     all_preds = []
     all_labels = []
+
+    saved_mean = None
+    saved_std = None
+
     with torch.no_grad():
         while test_ds.iteration < args.max_iter:
             testing_batches = next(test_ds)
             for testing_batch in testing_batches:
                 statistics, labels = testing_batch.items()
-                x = torch.tensor(statistics.numpy(), dtype=torch.float32).to(device)
+                stats_np = statistics.numpy()
+
+                # Normalization per batch → calculate mean and std for first batch
+                # and use them for all following batches.
+                if saved_mean is None or saved_std is None:
+                    mean = stats_np.mean(axis=0)
+                    std = stats_np.std(axis=0) + 1e-8
+                    saved_mean = mean.copy()
+                    saved_std = std.copy()
+                else:
+                    mean = saved_mean
+                    std = saved_std
+
+                x = torch.tensor(stats_np, dtype=torch.float32).to(device)
                 y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
+
                 outputs = model(x)
                 loss = criterion(outputs, y)
+
                 preds = torch.softmax(outputs, dim=1).cpu().numpy()
                 all_preds.append(preds)
                 all_labels.append(labels.numpy())
-    # Concatenate all predictions and labels
 
     all_preds = np.concatenate(all_preds, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
+
     return all_preds, all_labels
+
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")

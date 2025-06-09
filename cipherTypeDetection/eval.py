@@ -124,12 +124,17 @@ def benchmark(args, model, architecture):
     print("Datasets loaded.\n")
 
     print('Evaluating model...')
+
     import time
     start_time = time.time()
     iteration = 0
     epoch = 0
     results = []
     prediction_metrics = PredictionPerformanceMetrics(model_name=architecture)
+
+    saved_mean = None
+    saved_std = None
+
     while dataset.iteration < args.max_iter:
         batches = next(dataset)
         
@@ -140,8 +145,23 @@ def benchmark(args, model, architecture):
                 if hasattr(model, "evaluate"):  # Keras model
                     results.append(model.evaluate(statistics, labels, batch_size=args.batch_size, verbose=1))
                 else:  # PyTorch model
-                    x = torch.tensor(statistics.numpy(), dtype=torch.float32)
+                    stats_np = statistics.numpy()
+
+                    # Normalization: solo al primo batch
+                    if saved_mean is None or saved_std is None:
+                        mean = stats_np.mean(axis=0)
+                        std = stats_np.std(axis=0) + 1e-8
+                        saved_mean = mean.copy()
+                        saved_std = std.copy()
+                    else:
+                        mean = saved_mean
+                        std = saved_std
+
+                    stats_np = (stats_np - mean) / std
+
+                    x = torch.tensor(stats_np, dtype=torch.float32)
                     y = torch.tensor(labels.numpy(), dtype=torch.long)
+
                     with torch.no_grad():
                         outputs = model(x)
                         loss = F.cross_entropy(outputs, y)
@@ -149,10 +169,12 @@ def benchmark(args, model, architecture):
                         acc = (top1 == y).float().mean()
 
                         # Calc top-3
-                        top3 = torch.topk(outputs, k=3, dim=1).indices  # shape: (batch_size, 3)
-                        y_expanded = y.unsqueeze(1).expand_as(top3)     # shape: (batch_size, 3)
+                        top3 = torch.topk(outputs, k=3, dim=1).indices
+                        y_expanded = y.unsqueeze(1).expand_as(top3)
                         k3_acc = (top3 == y_expanded).any(dim=1).float().mean()
+
                         results.append((loss.item(), acc.item(), k3_acc.item()))
+
 
             elif architecture in ("CNN", "LSTM", "Transformer"):
                 results.append(model.evaluate(ciphertexts, labels, batch_size=args.batch_size, verbose=1))
@@ -423,7 +445,7 @@ def load_model(architecture, args, model_path, cipher_types):
         from cipherTypeDetection.train import TorchFFNN
 
         checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
-
+        
         model = TorchFFNN(
             input_size=checkpoint['input_size'],
             hidden_size=checkpoint['hidden_size'],
