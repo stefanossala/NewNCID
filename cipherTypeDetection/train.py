@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torchinfo import summary
 import numpy as np
+from torch.utils.data import TensorDataset, DataLoader
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -90,7 +91,6 @@ def train_torch_ffnn(model, args, train_ds):
     train_epoch = 0
     start_time = time.time()
 
-    # Variabales for validation data
     val_data_created = False
     x_val = y_val = None
 
@@ -105,8 +105,7 @@ def train_torch_ffnn(model, args, train_ds):
                 stats_np = statistics.numpy()
                 labels_np = labels.numpy()
 
-                # Normalization per batch → calculate mean and std for first batch
-                # and use them for all following batches.
+                """# Normalizzazione (prima batch)
                 if saved_mean is None or saved_std is None:
                     mean = stats_np.mean(axis=0)
                     std = stats_np.std(axis=0) + 1e-8
@@ -115,9 +114,11 @@ def train_torch_ffnn(model, args, train_ds):
                 else:
                     mean = saved_mean
                     std = saved_std
-
+                """
+                
+                #stats_np = (stats_np - mean) / std
+                
                 if not val_data_created:
-                    # Initial split: 70% train, 30% validation
                     x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(
                         stats_np, labels_np, test_size=0.3
                     )
@@ -128,17 +129,29 @@ def train_torch_ffnn(model, args, train_ds):
                     x_train_np = stats_np
                     y_train_np = labels_np
 
-                x_train = torch.tensor(x_train_np, dtype=torch.float32).to(device)
-                y_train = torch.tensor(y_train_np, dtype=torch.long).to(device)
+                # Use DataLoader for creating minibatch
+                x_train = torch.tensor(x_train_np, dtype=torch.float32)
+                y_train = torch.tensor(y_train_np, dtype=torch.long)
 
-                # --- Training step ---
-                optimizer.zero_grad()
-                outputs = model(x_train)
-                loss = criterion(outputs, y_train)
-                loss.backward()
-                optimizer.step()
+                train_dataset = TensorDataset(x_train, y_train)
+                train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
-                train_iter += len(y_train)
+                batch_losses = []
+
+                for x_batch, y_batch in train_loader:
+                    x_batch = x_batch.to(device)
+                    y_batch = y_batch.to(device)
+
+                    optimizer.zero_grad()
+                    outputs = model(x_batch)
+                    loss = criterion(outputs, y_batch)
+                    loss.backward()
+                    optimizer.step()
+
+                    batch_losses.append(loss.item())
+                    train_iter += len(y_batch)
+
+                epoch_loss = sum(batch_losses) / len(batch_losses)
 
                 # --- Validation step ---
                 model.eval()
@@ -148,13 +161,12 @@ def train_torch_ffnn(model, args, train_ds):
                     val_pred = torch.argmax(val_outputs, dim=1)
                     val_acc = (val_pred == y_val).float().mean().item()
 
-                    # top-3 accuracy
                     top3 = torch.topk(val_outputs, k=3, dim=1).indices
                     y_val_exp = y_val.unsqueeze(1).expand_as(top3)
                     val_k3 = (top3 == y_val_exp).any(dim=1).float().mean().item()
 
                 print(f"Epoch: {epoch+1}, Iteration: {train_iter}, "
-                      f"Train Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}, "
+                      f"Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss.item():.4f}, "
                       f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
                 model.train()
 
@@ -185,7 +197,6 @@ def train_torch_ffnn(model, args, train_ds):
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
 
 
-
 def predict_torch_ffnn(model, test_ds, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
@@ -205,6 +216,7 @@ def predict_torch_ffnn(model, test_ds, args):
                 statistics, labels = testing_batch.items()
                 stats_np = statistics.numpy()
 
+                """"
                 # Normalization per batch → calculate mean and std for first batch
                 # and use them for all following batches.
                 if saved_mean is None or saved_std is None:
@@ -215,7 +227,8 @@ def predict_torch_ffnn(model, test_ds, args):
                 else:
                     mean = saved_mean
                     std = saved_std
-
+                """
+                
                 x = torch.tensor(stats_np, dtype=torch.float32).to(device)
                 y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
 
@@ -817,8 +830,6 @@ def train_model(model, strategy, args, train_ds):
     -------
     tuple
     """
-    if args.architecture == "FFNN" and isinstance(model, TorchFFNN):
-        return train_torch_ffnn(model, args, train_ds)
 
     checkpoints_dir = Path('../data/checkpoints')
     def delete_previous_checkpoints():
@@ -866,6 +877,9 @@ def train_model(model, strategy, args, train_ds):
     combined_batch = TrainingBatch("mixed", [], [])
     classes = list(range(len(config.CIPHER_TYPES)))
     should_create_validation_data = True
+
+    if args.architecture == "FFNN" and isinstance(model, TorchFFNN):
+        return train_torch_ffnn(model, args, train_ds)
 
     # Perform main training loop while the iterations don't exceed the user provided max_iter
     while train_ds.iteration < args.max_iter:
@@ -1114,22 +1128,7 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
     cntr = 0
     test_iter = 0
     test_epoch = 0
-
-    # PyTorch FFNN prediction
-    if architecture == "FFNN" and isinstance(model, TorchFFNN):
-        preds, labels = predict_torch_ffnn(model, test_ds, args)
-        # You may want to adapt this to your PredictionPerformanceMetrics usage:
-        prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
-        prediction_metrics[architecture].add_predictions(labels, preds)
-        for metrics in prediction_metrics.values():
-            metrics.print_evaluation()
-        elapsed_prediction_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
-        prediction_stats = 'Prediction time: %d days %d hours %d minutes %d seconds.' % (
-            elapsed_prediction_time.days, elapsed_prediction_time.seconds // 3600, 
-            (elapsed_prediction_time.seconds // 60) % 60,
-            elapsed_prediction_time.seconds % 60)
-        return prediction_stats
-
+        
     # Determine the number of iterations to use for evaluating the model
     prediction_dataset_factor = 10
     if early_stopping_callback.stop_training:
@@ -1198,6 +1197,19 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 prediction_metrics["RF"].add_predictions(labels, model[2].predict_proba(statistics))
                 prediction_metrics["SVM"].add_predictions(labels, model[3].predict_proba(statistics))
                 prediction_metrics["kNN"].add_predictions(labels, model[4].predict_proba(statistics))
+            elif architecture == "FFNN" and isinstance(model, TorchFFNN):
+                preds, labels = predict_torch_ffnn(model, test_ds, args)
+                # You may want to adapt this to your PredictionPerformanceMetrics usage:
+                prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
+                prediction_metrics[architecture].add_predictions(labels, preds)
+                for metrics in prediction_metrics.values():
+                    metrics.print_evaluation()
+                elapsed_prediction_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
+                prediction_stats = 'Prediction time: %d days %d hours %d minutes %d seconds.' % (
+                    elapsed_prediction_time.days, elapsed_prediction_time.seconds // 3600, 
+                    (elapsed_prediction_time.seconds // 60) % 60,
+                    elapsed_prediction_time.seconds % 60)
+                return prediction_stats
             else:
                 prediction = model.predict(statistics, batch_size=args.batch_size, verbose=1)
                 prediction_metrics[architecture].add_predictions(labels, prediction)

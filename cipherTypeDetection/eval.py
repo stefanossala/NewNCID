@@ -147,6 +147,7 @@ def benchmark(args, model, architecture):
                 else:  # PyTorch model
                     stats_np = statistics.numpy()
 
+                    """
                     # Normalization: solo al primo batch
                     if saved_mean is None or saved_std is None:
                         mean = stats_np.mean(axis=0)
@@ -158,7 +159,8 @@ def benchmark(args, model, architecture):
                         std = saved_std
 
                     stats_np = (stats_np - mean) / std
-
+                    """
+                    
                     x = torch.tensor(stats_np, dtype=torch.float32)
                     y = torch.tensor(labels.numpy(), dtype=torch.long)
 
