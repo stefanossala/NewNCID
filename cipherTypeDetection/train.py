@@ -14,6 +14,7 @@ import functools
 # PyTorch
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torchinfo import summary
 import numpy as np
@@ -50,7 +51,7 @@ print = functools.partial(print, flush=True)
 for device in tf.config.list_physical_devices('GPU'):
     tf.config.experimental.set_memory_growth(device, True)
 
-class TorchFFNN(nn.Module):
+class FFNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_hidden_layers):
         super().__init__()
 
@@ -69,6 +70,31 @@ class TorchFFNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.num_layers = num_layers
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x = x.float()
+        output, (hidden, _) = self.lstm(x)
+        logits = self.fc(hidden[-1])
+        return logits
+
+        
 def train_torch_ffnn(model, args, train_ds):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -94,9 +120,6 @@ def train_torch_ffnn(model, args, train_ds):
     val_data_created = False
     x_val = y_val = None
 
-    saved_mean = None
-    saved_std = None
-
     for epoch in range(args.epochs):
         while train_ds.iteration < args.max_iter:
             training_batches = next(train_ds)
@@ -104,19 +127,6 @@ def train_torch_ffnn(model, args, train_ds):
                 statistics, labels = training_batch.items()
                 stats_np = statistics.numpy()
                 labels_np = labels.numpy()
-
-                """# Normalizzazione (prima batch)
-                if saved_mean is None or saved_std is None:
-                    mean = stats_np.mean(axis=0)
-                    std = stats_np.std(axis=0) + 1e-8
-                    saved_mean = mean.copy()
-                    saved_std = std.copy()
-                else:
-                    mean = saved_mean
-                    std = saved_std
-                """
-                
-                #stats_np = (stats_np - mean) / std
                 
                 if not val_data_created:
                     x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(
@@ -197,6 +207,115 @@ def train_torch_ffnn(model, args, train_ds):
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
 
 
+def train_torch_lstm(model, args, train_ds):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=config.learning_rate,
+        betas=(config.beta_1, config.beta_2),
+        eps=config.epsilon,
+        amsgrad=config.amsgrad
+    )
+    criterion = nn.CrossEntropyLoss()
+    model.train()
+
+    best_val_acc = 0
+    patience_counter = 0
+    patience_limit = 250
+
+    train_iter = 0
+    train_epoch = 0
+    start_time = time.time()
+
+    val_data_created = False
+    x_val = y_val = None
+
+    for epoch in range(args.epochs):
+        while train_ds.iteration < args.max_iter:
+            training_batches = next(train_ds)
+            for training_batch in training_batches:
+                statistics, labels = training_batch.items()
+                stats_np = statistics.numpy().astype(int)
+                labels_np = labels.numpy()
+
+                if not val_data_created:
+                    x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(stats_np, labels_np, test_size=0.3)
+                    x_val = torch.tensor(x_val_np, dtype=torch.long).to(device)
+                    y_val = torch.tensor(y_val_np, dtype=torch.long).to(device)
+                    val_data_created = True
+                else:
+                    x_train_np = stats_np
+                    y_train_np = labels_np
+
+                x_train = torch.tensor(x_train_np, dtype=torch.long)
+                y_train = torch.tensor(y_train_np, dtype=torch.long)
+
+                train_dataset = TensorDataset(x_train, y_train)
+                train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+                batch_losses = []
+                for x_batch, y_batch in train_loader:
+                    x_batch = x_batch.to(device)
+                    y_batch = y_batch.to(device)
+
+                    optimizer.zero_grad()
+                    outputs = model(x_batch)
+                    loss = criterion(outputs, y_batch)
+                    loss.backward()
+                    optimizer.step()
+
+                    batch_losses.append(loss.item())
+                    train_iter += len(y_batch)
+
+                epoch_loss = sum(batch_losses) / len(batch_losses)
+                
+                # --- Validation step ---
+                model.eval()
+                with torch.no_grad():
+                    val_outputs = model(x_val)
+                    val_loss = criterion(val_outputs, y_val)
+                    val_pred = torch.argmax(val_outputs, dim=1)
+                    val_acc = (val_pred == y_val).float().mean().item()
+
+                    top3 = torch.topk(val_outputs, k=3, dim=1).indices
+                    y_val_exp = y_val.unsqueeze(1).expand_as(top3)
+                    val_k3 = (top3 == y_val_exp).any(dim=1).float().mean().item()
+
+                print(f"Epoch: {epoch+1}, Iteration: {train_iter}, "
+                      f"Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss.item():.4f}, "
+                      f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
+                model.train()
+
+                # --- Early stopping check ---
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience_limit:
+                        print("Early stopping triggered.")
+                        elapsed = time.time() - start_time
+                        t = time.gmtime(elapsed)
+                        print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
+                        class DummyEarlyStopping: stop_training = True
+                        return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
+
+                if train_iter >= args.max_iter:
+                    break
+            if train_iter >= args.max_iter:
+                break
+        train_epoch += 1
+
+    elapsed = time.time() - start_time
+    t = time.gmtime(elapsed)
+    print(f"Finished {train_epoch} epochs in {t.tm_hour}h {t.tm_min}m {t.tm_sec}s")
+    class DummyEarlyStopping: stop_training = False
+    return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
+
+
+
 def predict_torch_ffnn(model, test_ds, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
@@ -206,30 +325,57 @@ def predict_torch_ffnn(model, test_ds, args):
     all_preds = []
     all_labels = []
 
-    saved_mean = None
-    saved_std = None
-
     with torch.no_grad():
         while test_ds.iteration < args.max_iter:
             testing_batches = next(test_ds)
             for testing_batch in testing_batches:
                 statistics, labels = testing_batch.items()
                 stats_np = statistics.numpy()
-
-                """"
-                # Normalization per batch → calculate mean and std for first batch
-                # and use them for all following batches.
-                if saved_mean is None or saved_std is None:
-                    mean = stats_np.mean(axis=0)
-                    std = stats_np.std(axis=0) + 1e-8
-                    saved_mean = mean.copy()
-                    saved_std = std.copy()
-                else:
-                    mean = saved_mean
-                    std = saved_std
-                """
                 
                 x = torch.tensor(stats_np, dtype=torch.float32).to(device)
+                y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
+
+                outputs = model(x)
+                loss = criterion(outputs, y)
+
+                pred_top1 = torch.argmax(outputs, dim=1)
+                acc = (pred_top1 == y).float().mean().item()
+
+                top3 = torch.topk(outputs, k=3, dim=1).indices
+                y_expanded = y.unsqueeze(1).expand_as(top3)
+                k3_acc = (top3 == y_expanded).any(dim=1).float().mean().item()
+
+                print(f"Eval → Loss: {loss.item():.4f}, Accuracy: {acc:.4f}, Top-3 Accuracy: {k3_acc:.4f}")
+
+                preds = torch.softmax(outputs, dim=1).cpu().numpy()
+                all_preds.append(preds)
+                all_labels.append(labels.numpy())
+
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    return all_preds, all_labels
+
+
+
+
+def predict_torch_lstm(model, test_ds, args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    model.to(device)
+    criterion = nn.CrossEntropyLoss()
+
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        while test_ds.iteration < args.max_iter:
+            testing_batches = next(test_ds)
+            for testing_batch in testing_batches:
+                statistics, labels = testing_batch.items()
+
+                stats_np = statistics.numpy().astype(int)  # input tokenizzati
+                x = torch.tensor(stats_np, dtype=torch.long).to(device)
                 y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
 
                 outputs = model(x)
@@ -243,6 +389,7 @@ def predict_torch_ffnn(model, test_ds, args):
     all_labels = np.concatenate(all_labels, axis=0)
 
     return all_preds, all_labels
+
 
 
 def str2bool(v):
@@ -325,7 +472,7 @@ def create_model(architecture, extend_model, output_layer_size, max_train_len):
     # Create new model based on architecture
     if architecture == "FFNN":
         # Use PyTorch for FFNN
-        model = TorchFFNN(
+        model = FFNN(
             input_size=input_layer_size,
             hidden_size=hidden_layer_size,
             output_size=output_layer_size,
@@ -351,18 +498,14 @@ def create_model(architecture, extend_model, output_layer_size, max_train_len):
         return model
     
     elif architecture == "LSTM":
-        config.FEATURE_ENGINEERING = False
-        config.PAD_INPUT = True
-        model = tf.keras.Sequential()
-        model.add(tf.keras.layers.Embedding(56, 64, input_length=max_train_len))
-        # model_.add(tf.keras.layers.Dropout(0.2))
-        model.add(tf.keras.layers.LSTM(config.lstm_units))
-        # model_.add(tf.keras.layers.Dropout(0.2))
-        model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dense(output_layer_size, activation='softmax'))
-        model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy", 
-                    metrics=["accuracy", SparseTopKCategoricalAccuracy(k=3, name="k3_accuracy")])
+        model = LSTM(
+            input_size=input_layer_size,
+            hidden_size=config.lstm_units,
+            output_size=output_layer_size,
+            num_layers=1 # could this be hidden_layers?
+        )
         return model
+
     
     elif architecture == "DT":
         return DecisionTreeClassifier(criterion=config.criterion, ccp_alpha=config.ccp_alpha)
@@ -878,8 +1021,12 @@ def train_model(model, strategy, args, train_ds):
     classes = list(range(len(config.CIPHER_TYPES)))
     should_create_validation_data = True
 
-    if args.architecture == "FFNN" and isinstance(model, TorchFFNN):
+    if args.architecture == "FFNN" and isinstance(model, FFNN):
         return train_torch_ffnn(model, args, train_ds)
+    
+    elif args.architecture == "LSTM" and isinstance(model, LSTM):
+        return train_torch_lstm(model, args, train_ds)
+    
 
     # Perform main training loop while the iterations don't exceed the user provided max_iter
     while train_ds.iteration < args.max_iter:
@@ -1041,18 +1188,16 @@ def save_model(model, args):
 
     model_path = os.path.join(args.save_directory, model_name)
 
-    if architecture == "FFNN":
-        if isinstance(model, TorchFFNN):
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'input_size': model.input_size,
-                'hidden_size': model.hidden_size,
-                'output_size': model.output_size,
-                'num_hidden_layers': model.num_hidden_layers
-            }, model_path)
+    if architecture in ("FFNN", "LSTM"):
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'input_size': model.input_size,
+            'hidden_size': model.hidden_size,
+            'output_size': model.output_size,
+            'num_layers': model.num_layers if hasattr(model, 'num_layers') else model.num_hidden_layers
+        }, model_path)
 
-
-    elif architecture in ("CNN", "LSTM", "Transformer"):
+    elif architecture in ("CNN", "Transformer"):
         model.save(model_path)
 
     elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN", "SVM-Rotor"):
@@ -1197,9 +1342,23 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 prediction_metrics["RF"].add_predictions(labels, model[2].predict_proba(statistics))
                 prediction_metrics["SVM"].add_predictions(labels, model[3].predict_proba(statistics))
                 prediction_metrics["kNN"].add_predictions(labels, model[4].predict_proba(statistics))
-            elif architecture == "FFNN" and isinstance(model, TorchFFNN):
+                
+            elif architecture == "FFNN" and isinstance(model, FFNN):
                 preds, labels = predict_torch_ffnn(model, test_ds, args)
                 # You may want to adapt this to your PredictionPerformanceMetrics usage:
+                prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
+                prediction_metrics[architecture].add_predictions(labels, preds)
+                for metrics in prediction_metrics.values():
+                    metrics.print_evaluation()
+                elapsed_prediction_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
+                prediction_stats = 'Prediction time: %d days %d hours %d minutes %d seconds.' % (
+                    elapsed_prediction_time.days, elapsed_prediction_time.seconds // 3600, 
+                    (elapsed_prediction_time.seconds // 60) % 60,
+                    elapsed_prediction_time.seconds % 60)
+                return prediction_stats
+            
+            elif architecture == "LSTM" and isinstance(model, LSTM):
+                preds, labels = predict_torch_lstm(model, test_ds, args)
                 prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
                 prediction_metrics[architecture].add_predictions(labels, preds)
                 for metrics in prediction_metrics.values():
