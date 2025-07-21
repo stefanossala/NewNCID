@@ -180,6 +180,7 @@ def train_torch_ffnn(model, args, train_ds):
                       f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
                 model.train()
 
+                """
                 # --- Early stopping check ---
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
@@ -193,7 +194,8 @@ def train_torch_ffnn(model, args, train_ds):
                         print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
                         class DummyEarlyStopping: stop_training = True
                         return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
-
+                """
+                
                 if train_iter >= args.max_iter:
                     break
             if train_iter >= args.max_iter:
