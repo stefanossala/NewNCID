@@ -70,29 +70,43 @@ class FFNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
+    def __init__(self, vocab_size, embed_dim, hidden_size, output_size, num_layers=1, dropout=0.0):
         super().__init__()
-        self.input_size = input_size
+
+        # saves parameters so that they can be saved and loaded later
+        self.vocab_size = vocab_size
+        self.embed_dim = embed_dim
         self.hidden_size = hidden_size
         self.output_size = output_size
         self.num_layers = num_layers
+        self.dropout = dropout
 
+        # Layers
+        self.embedding = nn.Embedding(
+            num_embeddings=vocab_size,
+            embedding_dim=embed_dim,
+            padding_idx=0
+        )
         self.lstm = nn.LSTM(
-            input_size=input_size,
+            input_size=embed_dim,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            batch_first=True
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0
         )
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        x = x.float()
-        output, (hidden, _) = self.lstm(x)
-        logits = self.fc(hidden[-1])
+        # x: LongTensor of shape [B, L] or [B, L, 1]
+        if x.dim()==3 and x.size(2)==1:
+            x = x.squeeze(2)                     # remove channel dim → [B, L]
+        emb     = self.embedding(x)              # → [B, L, D]
+        output, (hidden, _) = self.lstm(emb)     # hidden: [num_layers, B, H]
+        logits  = self.fc(hidden[-1])            # take last layer’s hidden state → [B, C]
         return logits
+
 
         
 def train_torch_ffnn(model, args, train_ds):
@@ -419,7 +433,12 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
             if hasattr(model, "summary"):
                 model.summary()
             else:
-                summary(model, input_size=(1, 724))
+                # for LSTM use a LongTensor dummy input of shape (1, max_train_len)
+                if architecture == "LSTM":
+                    summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
+                else:
+                    summary(model, input_size=(1, 724))
+
     else:
         print("Only one GPU found.")
         strategy = NullDistributionStrategy()
@@ -430,7 +449,12 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
             if hasattr(model, "summary"):
                 model.summary()
             else:
-                summary(model, input_size=(1, 724))
+                # for LSTM use a LongTensor dummy input of shape (1, max_train_len)
+                if architecture == "LSTM":
+                    summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
+                else:
+                    summary(model, input_size=(1, 724))
+
 
     print('Model created.\n')
     return model, strategy
@@ -502,11 +526,15 @@ def create_model(architecture, extend_model, output_layer_size, max_train_len):
         return model
     
     elif architecture == "LSTM":
+        config.FEATURE_ENGINEERING = False
+        config.PAD_INPUT = True
         model = LSTM(
-            input_size=input_layer_size,
+            vocab_size=56,
+            embed_dim=64,
             hidden_size=config.lstm_units,
             output_size=output_layer_size,
-            num_layers=1 # could this be hidden_layers?
+            num_layers=1,
+            dropout=0.0
         )
         return model
 
@@ -1195,10 +1223,13 @@ def save_model(model, args):
     if architecture in ("FFNN", "LSTM"):
         torch.save({
             'model_state_dict': model.state_dict(),
-            'input_size': model.input_size,
+            # FFNN use input_size, but LSTM use vocab/embed/hidden...
+            **({'input_size': model.input_size} if architecture=="FFNN" else {}),
+            **({'vocab_size': model.vocab_size, 'embed_dim': model.embed_dim} if architecture=="LSTM" else {}),
             'hidden_size': model.hidden_size,
             'output_size': model.output_size,
-            'num_layers': model.num_layers if hasattr(model, 'num_layers') else model.num_hidden_layers
+            'num_layers': model.num_layers,
+            **({'dropout': model.dropout} if architecture=="LSTM" else {}),
         }, model_path)
 
     elif architecture in ("CNN", "Transformer"):
@@ -1505,10 +1536,9 @@ def main():
     output_layer_size = max([config.CIPHER_TYPES.index(type) for type in cipher_types]) + 1
 
     # Create a model and allow for distributed training on multi-GPU machines
-    model, strategy = create_model_with_distribution_strategy(architecture, 
-                                                    extend_model, 
-                                                    output_layer_size=output_layer_size, 
-                                                    max_train_len=args.max_train_len)
+    model, strategy = create_model_with_distribution_strategy(
+    architecture, extend_model, output_layer_size=output_layer_size, max_train_len=args.max_train_len)
+
     
     early_stopping_callback, train_iter, training_stats = train_model(model, strategy, 
                                                                       args, train_ds)
