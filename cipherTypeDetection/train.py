@@ -98,13 +98,31 @@ class LSTM(nn.Module):
         )
         self.fc = nn.Linear(hidden_size, output_size)
 
+    # B: Batch size           – number of sequences processed in parallel
+    # L: Sequence length      – number of time steps (tokens) in each sequence
+    # D: Embedding dimension  – size of each token’s embedding vector
+    # H: Hidden size          – number of features in the LSTM hidden state
+    # C: Number of classes    – dimensionality of the output logits
+    
     def forward(self, x):
         # x: LongTensor of shape [B, L] or [B, L, 1]
-        if x.dim()==3 and x.size(2)==1:
-            x = x.squeeze(2)                     # remove channel dim → [B, L]
-        emb     = self.embedding(x)              # → [B, L, D]
-        output, (hidden, _) = self.lstm(emb)     # hidden: [num_layers, B, H]
-        logits  = self.fc(hidden[-1])            # take last layer’s hidden state → [B, C]
+        if x.dim() == 3 and x.size(2) == 1:
+            x = x.squeeze(2)                  # remove channel dimension → [B, L]
+
+        emb = self.embedding(x)              # embeddings → [B, L, D]
+
+        # LSTM returns:
+        # - output: hidden state at each time step → [B, L, H]
+        # - hidden: final hidden state for each layer → [num_layers, B, H]
+        output, (hidden, _) = self.lstm(emb)
+
+        # hidden[-1] selects the final hidden state of the top (last) layer 
+        # at the last time step → [B, H]
+        last_hidden = hidden[-1]
+
+        # apply the fully-connected layer to get logits → [B, C]
+        logits = self.fc(last_hidden)
+
         return logits
 
 
