@@ -114,6 +114,7 @@ class LSTM(nn.Module):
         # LSTM returns:
         # - output: hidden state at each time step → [B, L, H]
         # - hidden: final hidden state for each layer → [num_layers, B, H]
+        # not used as we only need the last hidden state, but can be useful for debugging
         output, (hidden, _) = self.lstm(emb)
 
         # hidden[-1] selects the final hidden state of the top (last) layer 
@@ -1239,16 +1240,23 @@ def save_model(model, args):
     model_path = os.path.join(args.save_directory, model_name)
 
     if architecture in ("FFNN", "LSTM"):
-        torch.save({
+        state_dict = {
             'model_state_dict': model.state_dict(),
-            # FFNN use input_size, but LSTM use vocab/embed/hidden...
-            **({'input_size': model.input_size} if architecture=="FFNN" else {}),
-            **({'vocab_size': model.vocab_size, 'embed_dim': model.embed_dim} if architecture=="LSTM" else {}),
             'hidden_size': model.hidden_size,
             'output_size': model.output_size,
-            'num_layers': model.num_layers,
-            **({'dropout': model.dropout} if architecture=="LSTM" else {}),
-        }, model_path)
+        }
+
+        if architecture == "FFNN":
+            state_dict['input_size'] = model.input_size
+            state_dict['num_hidden_layers'] = model.num_hidden_layers
+        elif architecture == "LSTM":
+            state_dict['vocab_size'] = model.vocab_size
+            state_dict['embed_dim'] = model.embed_dim
+            state_dict['num_layers'] = model.num_layers
+            state_dict['dropout'] = model.dropout
+
+        torch.save(state_dict, model_path)
+
 
     elif architecture in ("CNN", "Transformer"):
         model.save(model_path)
@@ -1266,13 +1274,14 @@ def save_model(model, args):
         for index, name in enumerate(["dt", "et", "rf", "svm", "knn"]):
             with open('../data/models/' + model_path.split('.')[0] + f"_{name}.h5", "wb") as f:
                 pickle.dump(model[index], f)
-
-    # Salvataggio parametri
+    
+    """
+    # Saving parameters
     with open('../data/' + model_path.split('.')[0] + '_parameters.txt', 'w') as f:
         for arg in vars(args):
             f.write("{:23s}= {:s}\n".format(arg, str(getattr(args, arg))))
 
-    # Gestione logs
+    # Managing logs
     if architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
         logs_destination = '../data/' + model_name.split('.')[0] + '_tensorboard_logs'
         try:
@@ -1282,7 +1291,7 @@ def save_model(model, args):
                 shutil.move('../data/logs', logs_destination)
         except Exception:
             print(f"Could not move logs from '../data/logs' to '{logs_destination}'.")
-
+    """
     print('Model saved.\n')
 
 
