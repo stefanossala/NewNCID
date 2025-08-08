@@ -1,18 +1,22 @@
 #!/bin/bash
 
-BASE_DIR=benchmark_logs
+BASE_DIR=output
 mkdir -p "$BASE_DIR"
+
+DATE=$(date "+%Y%m%d")
 
 COMMON_ARGS="--download_dataset=False \
     --plaintext_input_directory=../data/gutenberg_en \
     --rotor_input_directory=../data/rotor_ciphertexts \
-    --train_dataset_size=244 \
-    --batch_size=128 \
-    --max_iter=1000 \
+    --train_dataset_size=976 \
+    --dataset_workers=16 \
+    --batch_size=64 \
+    --max_iter=10000000 \
     --min_train_len=100 \
     --max_train_len=1000 \
     --min_test_len=100 \
     --max_test_len=1000 \
+    --epochs=1 \
     --ciphers=all"
 
 run_benchmark () {
