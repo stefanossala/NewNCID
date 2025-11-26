@@ -14,7 +14,6 @@ import functools
 # PyTorch
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torchinfo import summary
 import numpy as np
@@ -126,9 +125,8 @@ class LSTM(nn.Module):
 
         return logits
 
-
-        
-def train_torch_ffnn(model, args, train_ds):
+      
+def train_torch(model, args, train_ds):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -158,7 +156,10 @@ def train_torch_ffnn(model, args, train_ds):
             training_batches = next(train_ds)
             for training_batch in training_batches:
                 statistics, labels = training_batch.items()
-                stats_np = statistics.numpy()
+                if args.architecture == "LSTM":
+                    stats_np = statistics.numpy().astype(int)
+                else:
+                    stats_np = statistics.numpy()
                 labels_np = labels.numpy()
                 
                 if not val_data_created:
@@ -213,7 +214,6 @@ def train_torch_ffnn(model, args, train_ds):
                       f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
                 model.train()
 
-                """
                 # --- Early stopping check ---
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
@@ -227,7 +227,6 @@ def train_torch_ffnn(model, args, train_ds):
                         print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
                         class DummyEarlyStopping: stop_training = True
                         return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
-                """
                 
                 if train_iter >= args.max_iter:
                     break
@@ -242,118 +241,7 @@ def train_torch_ffnn(model, args, train_ds):
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
 
 
-def train_torch_lstm(model, args, train_ds):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=config.learning_rate,
-        betas=(config.beta_1, config.beta_2),
-        eps=config.epsilon,
-        amsgrad=config.amsgrad
-    )
-    criterion = nn.CrossEntropyLoss()
-    model.train()
-
-    best_val_acc = 0
-    patience_counter = 0
-    patience_limit = 250
-
-    train_iter = 0
-    train_epoch = 0
-    start_time = time.time()
-
-    val_data_created = False
-    x_val = y_val = None
-
-    for epoch in range(args.epochs):
-        while train_ds.iteration < args.max_iter:
-            training_batches = next(train_ds)
-            for training_batch in training_batches:
-                statistics, labels = training_batch.items()
-                stats_np = statistics.numpy().astype(int)
-                labels_np = labels.numpy()
-
-                if not val_data_created:
-                    x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(stats_np, labels_np, test_size=0.3)
-                    x_val = torch.tensor(x_val_np, dtype=torch.long).to(device)
-                    y_val = torch.tensor(y_val_np, dtype=torch.long).to(device)
-                    val_data_created = True
-                else:
-                    x_train_np = stats_np
-                    y_train_np = labels_np
-
-                x_train = torch.tensor(x_train_np, dtype=torch.long)
-                y_train = torch.tensor(y_train_np, dtype=torch.long)
-
-                train_dataset = TensorDataset(x_train, y_train)
-                train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-
-                batch_losses = []
-                for x_batch, y_batch in train_loader:
-                    x_batch = x_batch.to(device)
-                    y_batch = y_batch.to(device)
-
-                    optimizer.zero_grad()
-                    outputs = model(x_batch)
-                    loss = criterion(outputs, y_batch)
-                    loss.backward()
-                    optimizer.step()
-
-                    batch_losses.append(loss.item())
-                    train_iter += len(y_batch)
-
-                epoch_loss = sum(batch_losses) / len(batch_losses)
-                
-                # --- Validation step ---
-                model.eval()
-                with torch.no_grad():
-                    val_outputs = model(x_val)
-                    val_loss = criterion(val_outputs, y_val)
-                    val_pred = torch.argmax(val_outputs, dim=1)
-                    val_acc = (val_pred == y_val).float().mean().item()
-
-                    top3 = torch.topk(val_outputs, k=3, dim=1).indices
-                    y_val_exp = y_val.unsqueeze(1).expand_as(top3)
-                    val_k3 = (top3 == y_val_exp).any(dim=1).float().mean().item()
-
-                print(f"Epoch: {epoch+1}, Iteration: {train_iter}, "
-                      f"Train Loss: {epoch_loss:.4f}, Val Loss: {val_loss.item():.4f}, "
-                      f"Val Acc: {val_acc:.4f}, Val Top-3 Acc: {val_k3:.4f}")
-                model.train()
-
-                """
-                # --- Early stopping check ---
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience_limit:
-                        print("Early stopping triggered.")
-                        elapsed = time.time() - start_time
-                        t = time.gmtime(elapsed)
-                        print(f"Finished training in {t.tm_yday - 1} days {t.tm_hour} hours {t.tm_min} minutes {t.tm_sec} seconds with {train_iter} iterations.")
-                        class DummyEarlyStopping: stop_training = True
-                        return DummyEarlyStopping(), train_iter, f"Early stopped at epoch {epoch+1}"
-                """
-                
-                if train_iter >= args.max_iter:
-                    break
-            if train_iter >= args.max_iter:
-                break
-        train_epoch += 1
-
-    elapsed = time.time() - start_time
-    t = time.gmtime(elapsed)
-    print(f"Finished {train_epoch} epochs in {t.tm_hour}h {t.tm_min}m {t.tm_sec}s")
-    class DummyEarlyStopping: stop_training = False
-    return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
-
-
-
-def predict_torch_ffnn(model, test_ds, args):
+def predict_torch(model, test_ds, args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     model.to(device)
@@ -367,8 +255,11 @@ def predict_torch_ffnn(model, test_ds, args):
             testing_batches = next(test_ds)
             for testing_batch in testing_batches:
                 statistics, labels = testing_batch.items()
-                stats_np = statistics.numpy()
-                
+                if args.architecture == "LSTM":
+                    stats_np = statistics.numpy().astype(int)
+                else:
+                    stats_np = statistics.numpy()
+
                 x = torch.tensor(stats_np, dtype=torch.float32).to(device)
                 y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
 
@@ -392,41 +283,6 @@ def predict_torch_ffnn(model, test_ds, args):
     all_labels = np.concatenate(all_labels, axis=0)
 
     return all_preds, all_labels
-
-
-
-
-def predict_torch_lstm(model, test_ds, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.eval()
-    model.to(device)
-    criterion = nn.CrossEntropyLoss()
-
-    all_preds = []
-    all_labels = []
-
-    with torch.no_grad():
-        while test_ds.iteration < args.max_iter:
-            testing_batches = next(test_ds)
-            for testing_batch in testing_batches:
-                statistics, labels = testing_batch.items()
-
-                stats_np = statistics.numpy().astype(int)  # input tokenizzati
-                x = torch.tensor(stats_np, dtype=torch.long).to(device)
-                y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
-
-                outputs = model(x)
-                loss = criterion(outputs, y)
-
-                preds = torch.softmax(outputs, dim=1).cpu().numpy()
-                all_preds.append(preds)
-                all_labels.append(labels.numpy())
-
-    all_preds = np.concatenate(all_preds, axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
-
-    return all_preds, all_labels
-
 
 
 def str2bool(v):
@@ -667,7 +523,7 @@ def parse_arguments():
                              'When interrupting, the current model is \n'
                              'saved as interrupted_...')
     parser.add_argument('--model_name', default='m.h5', type=str,
-                        help='Name of the output model file. The file must \nhave the .h5 extension.')
+                        help='Name of the output model file. The file must \nhave the .h5 or .pth extension.')
     parser.add_argument('--ciphers', default='all', type=str,
                         help='A comma seperated list of the ciphers to be created.\n'
                              'Be careful to not use spaces or use \' to define the string.\n'
@@ -1073,10 +929,10 @@ def train_model(model, strategy, args, train_ds):
     should_create_validation_data = True
 
     if args.architecture == "FFNN" and isinstance(model, FFNN):
-        return train_torch_ffnn(model, args, train_ds)
+        return train_torch(model, args, train_ds)
     
     elif args.architecture == "LSTM" and isinstance(model, LSTM):
-        return train_torch_lstm(model, args, train_ds)
+        return train_torch(model, args, train_ds)
     
 
     # Perform main training loop while the iterations don't exceed the user provided max_iter
@@ -1406,7 +1262,7 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 prediction_metrics["kNN"].add_predictions(labels, model[4].predict_proba(statistics))
                 
             elif architecture == "FFNN" and isinstance(model, FFNN):
-                preds, labels = predict_torch_ffnn(model, test_ds, args)
+                preds, labels = predict_torch(model, test_ds, args)
                 # You may want to adapt this to your PredictionPerformanceMetrics usage:
                 prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
                 prediction_metrics[architecture].add_predictions(labels, preds)
@@ -1420,7 +1276,7 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 return prediction_stats
             
             elif architecture == "LSTM" and isinstance(model, LSTM):
-                preds, labels = predict_torch_lstm(model, test_ds, args)
+                preds, labels = predict_torch(model, test_ds, args)
                 prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
                 prediction_metrics[architecture].add_predictions(labels, preds)
                 for metrics in prediction_metrics.values():
@@ -1520,7 +1376,7 @@ def main():
 
     # Validate inputs
     if os.path.splitext(args.model_name)[1] not in ('.h5', '.pth'):
-        print('ERROR: The model must have extension ".h5" (for Keras) or ".pth" (for PyTorch FFNN).', file=sys.stderr)
+        print('ERROR: The model must have extension ".h5" (for Keras) or ".pth" (for PyTorch).', file=sys.stderr)
         sys.exit(1)
 
     if extend_model is not None:

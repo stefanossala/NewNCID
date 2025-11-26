@@ -10,8 +10,7 @@ import numpy as np
 from datetime import datetime
 
 import torch
-import torch.nn.functional as F
-import torch.optim as optim
+from cipherTypeDetection.train import FFNN
 
 # This environ variable must be set before all tensorflow imports!
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -132,9 +131,6 @@ def benchmark(args, model, architecture):
     results = []
     prediction_metrics = PredictionPerformanceMetrics(model_name=architecture)
 
-    saved_mean = None
-    saved_std = None
-
     while dataset.iteration < args.max_iter:
         batches = next(dataset)
         
@@ -146,20 +142,6 @@ def benchmark(args, model, architecture):
                     results.append(model.evaluate(statistics, labels, batch_size=args.batch_size, verbose=1))
                 else:  # PyTorch model
                     stats_np = statistics.numpy()
-
-                    """
-                    # Normalization: solo al primo batch
-                    if saved_mean is None or saved_std is None:
-                        mean = stats_np.mean(axis=0)
-                        std = stats_np.std(axis=0) + 1e-8
-                        saved_mean = mean.copy()
-                        saved_std = std.copy()
-                    else:
-                        mean = saved_mean
-                        std = saved_std
-
-                    stats_np = (stats_np - mean) / std
-                    """
                     
                     x = torch.tensor(stats_np, dtype=torch.float32)
                     y = torch.tensor(labels.numpy(), dtype=torch.long)
@@ -444,11 +426,10 @@ def load_model(architecture, args, model_path, cipher_types):
     model = None
 
     if architecture == "FFNN" and model_path.endswith(".pth"):
-        from cipherTypeDetection.train import TorchFFNN
 
         checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
         
-        model = TorchFFNN(
+        model = FFNN(
             input_size=checkpoint['input_size'],
             hidden_size=checkpoint['hidden_size'],
             output_size=checkpoint['output_size'],
@@ -687,7 +668,7 @@ def main():
     print("Model Loaded.")
 
     # Model is now always an ensemble
-    #architecture = "Ensemble"
+    architecture = "Ensemble"
 
     # the program was started as in benchmark mode.
     if args.download_dataset is not None:
