@@ -58,3 +58,15 @@ class LSTM(nn.Module):
 
         return logits
 
+    @torch.no_grad
+    def predict(self, input, batch_size):
+        x = torch.tensor(input, dtype=torch.int)
+
+        outputs = []
+        for i in range(0, len(x), batch_size):
+            batch = x[i : i + batch_size]
+            out = self(batch)
+            outputs.append(out)
+        outputs = torch.cat(outputs, dim=0)
+
+        return F.softmax(outputs, dim=1)

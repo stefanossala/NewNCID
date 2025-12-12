@@ -1,10 +1,12 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+from torch.nn import Module
 from cipherImplementations.cipher import OUTPUT_ALPHABET
 import cipherTypeDetection.config as config
 from cipherTypeDetection.featureCalculations import calculate_rotor_statistics
 from util.utils import get_model_input_length
+from cipherTypeDetection.config import Backend
 
 class RotorDifferentiationEnsemble:
     """
@@ -37,6 +39,11 @@ class RotorDifferentiationEnsemble:
         """
         self._general_architecture = general_model_architecture
         self._general_model = general_model
+        self._general_model_backend = (
+            Backend.PYTORCH 
+            if isinstance(self._general_model, Module) 
+            else Backend.KERAS
+        )
         self._rotor_only_model = rotor_only_model
 
     def predict(self, statistics, ciphertexts, batch_size, verbose=0):
@@ -69,7 +76,12 @@ class RotorDifferentiationEnsemble:
         
         # Perform full prediction for all ciphers
         architecture = self._general_architecture
-        if architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
+        backend = self._general_model_backend
+        if backend == Backend.PYTORCH:
+            if isinstance(statistics, tf.Tensor):
+                statistics = statistics.numpy()
+            predictions = self._general_model.predict(statistics, batch_size).numpy()
+        elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
             predictions = self._general_model.predict_proba(statistics)
         elif architecture == "Ensemble":
             predictions = self._general_model.predict(statistics, 

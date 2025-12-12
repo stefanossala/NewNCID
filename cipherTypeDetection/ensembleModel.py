@@ -1,4 +1,5 @@
 import tensorflow as tf
+import torch
 import pickle
 import numpy as np
 from tensorflow.keras.optimizers import Adam
@@ -7,6 +8,9 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 import cipherTypeDetection.config as config
 from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
 from cipherImplementations.cipher import OUTPUT_ALPHABET
+from cipherTypeDetection.config import Backend
+from cipherTypeDetection.models.ffnn import FFNN
+from cipherTypeDetection.models.lstm import LSTM
 from util.utils import get_model_input_length
 
 
@@ -37,9 +41,14 @@ mcc_rf = 0.7375076780194245
 mcc_nb = 0.5294535259111087
 # Cohen's Kappa is not used as these values are almost the same like MCC.
 
+class ModelMetadata:
+    def __init__(self, path, architecture, backend):
+        self.path = path
+        self.architecture = architecture
+        self.backend = backend
 
 class EnsembleModel:
-    def __init__(self, models, architectures, strategy, cipher_indices):
+    def __init__(self, model_metadata, strategy, cipher_indices):
         self.statistics_dict = {
             "FFNN": [f1_ffnn, accuracy_ffnn, recall_ffnn, precision_ffnn, mcc_ffnn],
             "Transformer": [f1_transformer, accuracy_transformer, recall_transformer, precision_transformer, mcc_transformer],
@@ -47,10 +56,10 @@ class EnsembleModel:
             "RF": [f1_rf, accuracy_rf, recall_rf, precision_rf, mcc_rf],
             "NB": [f1_nb, accuracy_nb, recall_nb, precision_nb, mcc_nb]
         }
-        self.models = models
-        self.architectures = architectures
+        self.model_metadata = model_metadata
+        self.models = [None] * len(self.model_metadata)
         self.strategy = strategy
-        if isinstance(models[0], str):
+        if isinstance(model_metadata[0].path, str):
             self.load_model()
         for key in self.statistics_dict:
             statistics = self.statistics_dict[key]
@@ -72,22 +81,53 @@ class EnsembleModel:
                 self.total_votes[i] += network_total_votes[i]
 
     def load_model(self):
-        for j in range(len(self.models)):
-            if self.architectures[j] in ("FFNN", "CNN", "LSTM", "Transformer"):
-                if self.architectures[j] == 'Transformer':
-                    model_ = tf.keras.models.load_model(self.models[j], custom_objects={
-                        'TokenAndPositionEmbedding': TokenAndPositionEmbedding, 'MultiHeadSelfAttention': MultiHeadSelfAttention,
-                        'TransformerBlock': TransformerBlock})
-                else:
-                    model_ = tf.keras.models.load_model(self.models[j])
-                optimizer = Adam(learning_rate=config.learning_rate, beta_1=config.beta_1, beta_2=config.beta_2, epsilon=config.epsilon,
-                                 amsgrad=config.amsgrad)
-                model_.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy",
-                               metrics=["accuracy", SparseTopKCategoricalAccuracy(k=3, name="k3_accuracy")])
-                self.models[j] = model_
+        for i, metadata in enumerate(self.model_metadata):
+            if metadata.backend == Backend.PYTORCH:
+                self.models[i] = self._load_pytorch(metadata.architecture, metadata.path)
+            elif metadata.architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
+                self.models[i] = self._load_keras(metadata.architecture, metadata.path)
             else:
-                with open(self.models[j], "rb") as f:
-                    self.models[j] = pickle.load(f)
+                with open(metadata.path, "rb") as f:
+                    self.models[i] = pickle.load(f)
+    
+    def _load_pytorch(self, architecture, path):
+        checkpoint = torch.load(path, map_location=torch.device("cpu"))
+        
+        if architecture == "FFNN":
+            model = FFNN(
+                input_size=checkpoint['input_size'],
+                hidden_size=checkpoint['hidden_size'],
+                output_size=checkpoint['output_size'],
+                num_hidden_layers=checkpoint['num_hidden_layers']
+            )
+        elif architecture == "LSTM":
+            model = LSTM(
+                vocab_size=checkpoint['vocab_size'],
+                embed_dim=checkpoint['embed_dim'],
+                hidden_size=checkpoint['hidden_size'],
+                output_size=checkpoint['output_size'],
+                num_layers=checkpoint['num_layers'],
+                dropout=checkpoint['dropout']
+            )
+        else:
+            raise ValueError(f"Unimplemented PyTorch architecutre: {architecture}")
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        return model
+    
+    def _load_keras(self, architecture, path):
+        if architecture == 'Transformer':
+            model = tf.keras.models.load_model(path, custom_objects={
+                'TokenAndPositionEmbedding': TokenAndPositionEmbedding, 'MultiHeadSelfAttention': MultiHeadSelfAttention,
+                'TransformerBlock': TransformerBlock})
+        else:
+            model = tf.keras.models.load_model(path)
+        optimizer = Adam(learning_rate=config.learning_rate, beta_1=config.beta_1, beta_2=config.beta_2, epsilon=config.epsilon,
+                            amsgrad=config.amsgrad)
+        model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy",
+                        metrics=["accuracy", SparseTopKCategoricalAccuracy(k=3, name="k3_accuracy")])
+        return model
 
     def evaluate(self, batch, batch_ciphertexts, labels, batch_size, metrics, verbose=0):
         correct_all = 0
@@ -111,9 +151,14 @@ class EnsembleModel:
 
     def predict(self, statistics, ciphertexts, batch_size, verbose=0):
         predictions = []
-        for index, model in enumerate(self.models):
-            architecture = self.architectures[index]
-            if architecture == "FFNN":
+        for index, metadata in enumerate(self.model_metadata):
+            model = self.models[index]
+            architecture = metadata.architecture
+            if metadata.backend == Backend.PYTORCH:
+                if isinstance(statistics, tf.Tensor):
+                    np_statistics = statistics.numpy()
+                predictions.append(model.predict(np_statistics, batch_size))
+            elif architecture == "FFNN":
                 predictions.append(model.predict(statistics, batch_size=batch_size, verbose=verbose))
             elif architecture in ("CNN", "LSTM", "Transformer"):
                 input_length = get_model_input_length(model, architecture)
@@ -168,7 +213,7 @@ class EnsembleModel:
                     scaled[i][j] = scaled[i][j] / len(predictions)
         elif self.strategy == 'weighted':
             for i in range(len(predictions)):
-                statistics = self.statistics_dict[self.architectures[i]]
+                statistics = self.statistics_dict[self.model_metadata[i].architecture]
                 for j in range(len(predictions[i])):
                     for k in range(len(predictions[i][j])):
                         scaled[j][k] += predictions[i][j][k] * statistics[-1][k] / self.total_votes[k]
