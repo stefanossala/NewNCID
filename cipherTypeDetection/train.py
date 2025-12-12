@@ -54,7 +54,7 @@ print = functools.partial(print, flush=True)
 for device in tf.config.list_physical_devices('GPU'):
     tf.config.experimental.set_memory_growth(device, True)
       
-def train_torch(model, args, train_ds):
+def train_torch(model, args, train_ds, feature_engineering):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -84,25 +84,28 @@ def train_torch(model, args, train_ds):
             training_batches = next(train_ds)
             for training_batch in training_batches:
                 statistics, labels = training_batch.items()
-                if args.architecture == "LSTM":
-                    stats_np = statistics.numpy().astype(int)
-                else:
-                    stats_np = statistics.numpy()
-                labels_np = labels.numpy()
+                statistics = statistics.numpy()
+                labels = labels.numpy()
+                if not feature_engineering:
+                    statistics = statistics.astype(int)
                 
                 if not val_data_created:
                     x_train_np, x_val_np, y_train_np, y_val_np = train_test_split(
-                        stats_np, labels_np, test_size=0.3
+                        statistics, labels, test_size=0.3
                     )
                     x_val = torch.tensor(x_val_np, dtype=torch.float32).to(device)
+                    if not feature_engineering:
+                        x_val = x_val.int()
                     y_val = torch.tensor(y_val_np, dtype=torch.long).to(device)
                     val_data_created = True
                 else:
-                    x_train_np = stats_np
-                    y_train_np = labels_np
+                    x_train_np = statistics
+                    y_train_np = labels
 
                 # Use DataLoader for creating minibatch
                 x_train = torch.tensor(x_train_np, dtype=torch.float32)
+                if not feature_engineering:
+                    x_train = x_train.int()
                 y_train = torch.tensor(y_train_np, dtype=torch.long)
 
                 train_dataset = TensorDataset(x_train, y_train)
@@ -169,48 +172,35 @@ def train_torch(model, args, train_ds):
     return DummyEarlyStopping(), train_iter, f"Trained for {train_epoch} epochs"
 
 
-def predict_torch(model, test_ds, args):
+def predict_torch(model, args, statistics, labels, feature_engineering):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
     model.to(device)
     criterion = nn.CrossEntropyLoss()
 
-    all_preds = []
-    all_labels = []
-
     with torch.no_grad():
-        while test_ds.iteration < args.max_iter:
-            testing_batches = next(test_ds)
-            for testing_batch in testing_batches:
-                statistics, labels = testing_batch.items()
-                if args.architecture == "LSTM":
-                    stats_np = statistics.numpy().astype(int)
-                else:
-                    stats_np = statistics.numpy()
+        statistics = statistics.numpy()
+        x = torch.tensor(statistics, dtype=torch.float32).to(device)
+        if not feature_engineering:
+            x = x.int()
 
-                x = torch.tensor(stats_np, dtype=torch.float32).to(device)
-                y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
+        y = torch.tensor(labels.numpy(), dtype=torch.long).to(device)
 
-                outputs = model(x)
-                loss = criterion(outputs, y)
+        outputs = model(x)
+        loss = criterion(outputs, y)
 
-                pred_top1 = torch.argmax(outputs, dim=1)
-                acc = (pred_top1 == y).float().mean().item()
+        pred_top1 = torch.argmax(outputs, dim=1)
+        acc = (pred_top1 == y).float().mean().item()
 
-                top3 = torch.topk(outputs, k=3, dim=1).indices
-                y_expanded = y.unsqueeze(1).expand_as(top3)
-                k3_acc = (top3 == y_expanded).any(dim=1).float().mean().item()
+        top3 = torch.topk(outputs, k=3, dim=1).indices
+        y_expanded = y.unsqueeze(1).expand_as(top3)
+        k3_acc = (top3 == y_expanded).any(dim=1).float().mean().item()
 
-                print(f"Eval → Loss: {loss.item():.4f}, Accuracy: {acc:.4f}, Top-3 Accuracy: {k3_acc:.4f}")
+        print(f"Eval → Loss: {loss.item():.4f}, Accuracy: {acc:.4f}, Top-3 Accuracy: {k3_acc:.4f}")
 
-                preds = torch.softmax(outputs, dim=1).cpu().numpy()
-                all_preds.append(preds)
-                all_labels.append(labels.numpy())
+        preds = torch.softmax(outputs, dim=1).cpu().numpy()
 
-    all_preds = np.concatenate(all_preds, axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
-
-    return all_preds, all_labels
+        return preds, labels.numpy()
 
 
 def str2bool(v):
@@ -856,13 +846,6 @@ def train_model(model, strategy, args, train_ds):
     classes = list(range(len(config.CIPHER_TYPES)))
     should_create_validation_data = True
 
-    if args.architecture == "FFNN" and isinstance(model, FFNN):
-        return train_torch(model, args, train_ds)
-    
-    elif args.architecture == "LSTM" and isinstance(model, LSTM):
-        return train_torch(model, args, train_ds)
-    
-
     # Perform main training loop while the iterations don't exceed the user provided max_iter
     while train_ds.iteration < args.max_iter:
         training_batches = next(train_ds)
@@ -1188,33 +1171,12 @@ def predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
                 prediction_metrics["RF"].add_predictions(labels, model[2].predict_proba(statistics))
                 prediction_metrics["SVM"].add_predictions(labels, model[3].predict_proba(statistics))
                 prediction_metrics["kNN"].add_predictions(labels, model[4].predict_proba(statistics))
-                
-            elif architecture == "FFNN" and isinstance(model, FFNN):
-                preds, labels = predict_torch(model, test_ds, args)
-                # You may want to adapt this to your PredictionPerformanceMetrics usage:
-                prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
-                prediction_metrics[architecture].add_predictions(labels, preds)
-                for metrics in prediction_metrics.values():
-                    metrics.print_evaluation()
-                elapsed_prediction_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
-                prediction_stats = 'Prediction time: %d days %d hours %d minutes %d seconds.' % (
-                    elapsed_prediction_time.days, elapsed_prediction_time.seconds // 3600, 
-                    (elapsed_prediction_time.seconds // 60) % 60,
-                    elapsed_prediction_time.seconds % 60)
-                return prediction_stats
-            
-            elif architecture == "LSTM" and isinstance(model, LSTM):
-                preds, labels = predict_torch(model, test_ds, args)
-                prediction_metrics = {architecture: PredictionPerformanceMetrics(model_name=architecture)}
-                prediction_metrics[architecture].add_predictions(labels, preds)
-                for metrics in prediction_metrics.values():
-                    metrics.print_evaluation()
-                elapsed_prediction_time = datetime.fromtimestamp(time.time()) - datetime.fromtimestamp(start_time)
-                prediction_stats = 'Prediction time: %d days %d hours %d minutes %d seconds.' % (
-                    elapsed_prediction_time.days, elapsed_prediction_time.seconds // 3600, 
-                    (elapsed_prediction_time.seconds // 60) % 60,
-                    elapsed_prediction_time.seconds % 60)
-                return prediction_stats
+            elif architecture == "FFNN":
+                prediction, labels = predict_torch(model, args, statistics, labels, feature_engineering=True)
+                prediction_metrics[architecture].add_predictions(labels, prediction)
+            elif architecture == "LSTM":
+                prediction, labels = predict_torch(model, args, statistics, labels, feature_engineering=False)
+                prediction_metrics[architecture].add_predictions(labels, prediction)
             else:
                 prediction = model.predict(statistics, batch_size=args.batch_size, verbose=1)
                 prediction_metrics[architecture].add_predictions(labels, prediction)
@@ -1302,10 +1264,19 @@ def main():
     architecture = args.architecture
     extend_model = args.extend_model
 
+    backend = Backend.KERAS
+    if architecture == "FFNN" or architecture == "LSTM":
+        backend = Backend.PYTORCH
+
     # Validate inputs
     if os.path.splitext(args.model_name)[1] not in ('.h5', '.pth'):
         print('ERROR: The model must have extension ".h5" (for Keras) or ".pth" (for PyTorch).', file=sys.stderr)
         sys.exit(1)
+    
+    if backend == Backend.PYTORCH and os.path.splitext(args.model_name)[1] != ".pth":
+        print("ERROR: PyTorch models must have .pth file extension.")
+        sys.exit(1)
+
 
     if extend_model is not None:
         if architecture not in ('FFNN', 'CNN', 'LSTM'):
@@ -1351,9 +1322,15 @@ def main():
     architecture, extend_model, output_layer_size=output_layer_size, max_train_len=args.max_train_len)
 
     
-    early_stopping_callback, train_iter, training_stats = train_model(model, strategy, 
+    if backend == Backend.KERAS:
+        early_stopping_callback, train_iter, training_stats = train_model(model, strategy, 
                                                                       args, train_ds)
     save_model(model, args)
+    elif backend == Backend.PYTORCH:
+        early_stopping_callback, train_iter, training_stats = train_torch(model, args, train_ds, config.FEATURE_ENGINEERING)
+    else:
+        raise ValueError(f"Unkown backend: {backend}")
+    
     prediction_stats = predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
     
     print(training_stats)
