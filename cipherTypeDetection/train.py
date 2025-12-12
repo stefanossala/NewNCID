@@ -207,7 +207,19 @@ def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
 
-def create_model_with_distribution_strategy(architecture, extend_model, output_layer_size, max_train_len):
+def print_model_summary(architecture, model, backend, max_train_len):
+    if backend == Backend.KERAS:
+        model.summary()
+    elif backend == Backend.PYTORCH:
+        # for LSTM use a LongTensor dummy input of shape (1, max_train_len)
+        if architecture == "LSTM":
+            summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
+        else:
+            summary(model, input_size=(1, 724))
+    else:
+        raise ValueError(f"Unknown backend {backend}")
+
+def create_model_with_distribution_strategy(architecture, backend, extend_model, output_layer_size, max_train_len):
     """Creates models depending on the GPU count and on extend_model"""
     print('Creating model...')
 
@@ -223,14 +235,7 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
                 extend_model = tf.keras.models.load_model(extend_model, compile=False)
             model = create_model(architecture, extend_model, output_layer_size, max_train_len)
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            if hasattr(model, "summary"):
-                model.summary()
-            else:
-                # for LSTM use a LongTensor dummy input of shape (1, max_train_len)
-                if architecture == "LSTM":
-                    summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
-                else:
-                    summary(model, input_size=(1, 724))
+            print_model_summary(architecture, model, backend, max_train_len)
 
     else:
         print("Only one GPU found.")
@@ -239,14 +244,7 @@ def create_model_with_distribution_strategy(architecture, extend_model, output_l
             extend_model = tf.keras.models.load_model(extend_model, compile=False)
         model = create_model(architecture, extend_model, output_layer_size, max_train_len)
         if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            if hasattr(model, "summary"):
-                model.summary()
-            else:
-                # for LSTM use a LongTensor dummy input of shape (1, max_train_len)
-                if architecture == "LSTM":
-                    summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
-                else:
-                    summary(model, input_size=(1, 724))
+            print_model_summary(architecture, model, backend, max_train_len)
 
 
     print('Model created.\n')
@@ -440,8 +438,10 @@ def parse_arguments():
                         help='Directory for saving generated models. \n'
                              'When interrupting, the current model is \n'
                              'saved as interrupted_...')
-    parser.add_argument('--model_name', default='m.h5', type=str,
-                        help='Name of the output model file. The file must \nhave the .h5 or .pth extension.')
+    parser.add_argument('--model_name', type=str,
+                        help='Name of the output model file. The file must \n'
+                             'have the .h5 or .pth extension for Keras models or \n'
+                             'PyTorch models, respectively.')
     parser.add_argument('--ciphers', default='all', type=str,
                         help='A comma seperated list of the ciphers to be created.\n'
                              'Be careful to not use spaces or use \' to define the string.\n'
@@ -983,7 +983,7 @@ def train_model(model, strategy, args, train_ds):
     print(training_stats)
     return early_stopping_callback, train_iter, training_stats
         
-def save_model(model, args):
+def save_model(model, args, backend):
     """Writes the model and the commandline arguments to disk."""
     print('Saving model...')
     architecture = args.architecture
@@ -991,18 +991,9 @@ def save_model(model, args):
     if not os.path.exists(args.save_directory):
         os.mkdir(args.save_directory)
 
-    # Gestione nome modello
-    if args.model_name == 'm.h5':
-        i = 1
-        base_name = args.model_name.split('.')[0]
-        extension = '.pth' if architecture == "FFNN" else '.h5'
-        while os.path.exists(os.path.join(args.save_directory, base_name + str(i) + extension)):
-            i += 1
-        model_name = base_name + str(i) + extension
-    else:
-        model_name = args.model_name
-        if architecture == "FFNN":
-            model_name = model_name.replace('.h5', '.pth')
+    model_name = args.model_name
+    if backend == Backend.PYTORCH and not model_name.endswith(".pth"):
+        model_name = model_name + '.pth'
 
     model_path = os.path.join(args.save_directory, model_name)
 
@@ -1030,26 +1021,29 @@ def save_model(model, args):
 
     elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN", "SVM-Rotor"):
         with open(model_path, "wb") as f:
+            # this gets very large
             pickle.dump(model, f)
 
     elif architecture == "[FFNN,NB]":
         model[0].save('../data/models/' + model_path.split('.')[0] + "_ffnn.h5")
         with open('../data/models/' + model_path.split('.')[0] + "_nb.h5", "wb") as f:
+            # this gets very large
             pickle.dump(model[1], f)
 
     elif architecture == "[DT,ET,RF,SVM,kNN]":
         for index, name in enumerate(["dt", "et", "rf", "svm", "knn"]):
+            # TODO: Are these files actually in the h5 format? Probably not!
             with open('../data/models/' + model_path.split('.')[0] + f"_{name}.h5", "wb") as f:
+                # this gets very large
                 pickle.dump(model[index], f)
     
-    """
-    # Saving parameters
+    # Write user provided commandline arguments into model path
     with open('../data/' + model_path.split('.')[0] + '_parameters.txt', 'w') as f:
         for arg in vars(args):
             f.write("{:23s}= {:s}\n".format(arg, str(getattr(args, arg))))
 
     # Managing logs
-    if architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
+    if architecture in ("CNN", "Transformer"):
         logs_destination = '../data/' + model_name.split('.')[0] + '_tensorboard_logs'
         try:
             if os.path.exists('../data/logs'):
@@ -1058,7 +1052,7 @@ def save_model(model, args):
                 shutil.move('../data/logs', logs_destination)
         except Exception:
             print(f"Could not move logs from '../data/logs' to '{logs_destination}'.")
-    """
+
     print('Model saved.\n')
 
 
@@ -1279,7 +1273,7 @@ def main():
 
 
     if extend_model is not None:
-        if architecture not in ('FFNN', 'CNN', 'LSTM'):
+        if architecture not in ('CNN'):
             print('ERROR: Models with the architecture %s can not be extended!' % architecture,
                   file=sys.stderr)
             sys.exit(1)
@@ -1319,18 +1313,18 @@ def main():
 
     # Create a model and allow for distributed training on multi-GPU machines
     model, strategy = create_model_with_distribution_strategy(
-    architecture, extend_model, output_layer_size=output_layer_size, max_train_len=args.max_train_len)
+    architecture, backend, extend_model, output_layer_size=output_layer_size, max_train_len=args.max_train_len)
 
     
     if backend == Backend.KERAS:
         early_stopping_callback, train_iter, training_stats = train_model(model, strategy, 
                                                                       args, train_ds)
-    save_model(model, args)
     elif backend == Backend.PYTORCH:
         early_stopping_callback, train_iter, training_stats = train_torch(model, args, train_ds, config.FEATURE_ENGINEERING)
     else:
         raise ValueError(f"Unkown backend: {backend}")
     
+    save_model(model, args, backend)
     prediction_stats = predict_test_data(test_ds, model, args, early_stopping_callback, train_iter)
     
     print(training_stats)
