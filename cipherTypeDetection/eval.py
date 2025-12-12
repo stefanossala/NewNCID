@@ -10,7 +10,6 @@ import numpy as np
 from datetime import datetime
 
 import torch
-from cipherTypeDetection.train import FFNN
 
 # This environ variable must be set before all tensorflow imports!
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -29,6 +28,8 @@ from cipherTypeDetection.ensembleModel import EnsembleModel
 from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
 from util.utils import get_model_input_length
 from cipherImplementations.cipher import OUTPUT_ALPHABET, UNKNOWN_SYMBOL_NUMBER
+from cipherTypeDetection.models.ffnn import FFNN
+from cipherTypeDetection.models.lstm import LSTM
 tf.debugging.set_log_device_placement(enabled=False)
 # always flush after print as some architectures like RF need very long time before printing anything.
 print = functools.partial(print, flush=True)

@@ -44,87 +44,15 @@ from cipherTypeDetection.predictionPerformanceMetrics import PredictionPerforman
 from cipherTypeDetection.miniBatchEarlyStoppingCallback import MiniBatchEarlyStopping
 from cipherTypeDetection.transformer import TransformerBlock, TokenAndPositionEmbedding
 from cipherTypeDetection.learningRateSchedulers import TimeBasedDecayLearningRateScheduler, CustomStepDecayLearningRateScheduler
+from cipherTypeDetection.models.ffnn import FFNN
+from cipherTypeDetection.models.lstm import LSTM
+from cipherTypeDetection.config import Backend
+
 tf.debugging.set_log_device_placement(enabled=False)
 # always flush after print as some architectures like RF need very long time before printing anything.
 print = functools.partial(print, flush=True)
 for device in tf.config.list_physical_devices('GPU'):
     tf.config.experimental.set_memory_growth(device, True)
-
-class FFNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_hidden_layers):
-        super().__init__()
-
-        # saves parameters so that they can be saved and loaded later
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.num_hidden_layers = num_hidden_layers
-
-        layers = [nn.Linear(input_size, hidden_size), nn.ReLU()]
-        for _ in range(num_hidden_layers - 1):
-            layers += [nn.Linear(hidden_size, hidden_size), nn.ReLU()]
-        layers.append(nn.Linear(hidden_size, output_size))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class LSTM(nn.Module):
-    def __init__(self, vocab_size, embed_dim, hidden_size, output_size, num_layers=1, dropout=0.0):
-        super().__init__()
-
-        # saves parameters so that they can be saved and loaded later
-        self.vocab_size = vocab_size
-        self.embed_dim = embed_dim
-        self.hidden_size = hidden_size
-        self.output_size = output_size
-        self.num_layers = num_layers
-        self.dropout = dropout
-
-        # Layers
-        self.embedding = nn.Embedding(
-            num_embeddings=vocab_size,
-            embedding_dim=embed_dim,
-            padding_idx=0
-        )
-        self.lstm = nn.LSTM(
-            input_size=embed_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0
-        )
-        self.fc = nn.Linear(hidden_size, output_size)
-
-    # B: Batch size           – number of sequences processed in parallel
-    # L: Sequence length      – number of time steps (tokens) in each sequence
-    # D: Embedding dimension  – size of each token’s embedding vector
-    # H: Hidden size          – number of features in the LSTM hidden state
-    # C: Number of classes    – dimensionality of the output logits
-    
-    def forward(self, x):
-        # x: LongTensor of shape [B, L] or [B, L, 1]
-        if x.dim() == 3 and x.size(2) == 1:
-            x = x.squeeze(2)                  # remove channel dimension → [B, L]
-
-        emb = self.embedding(x)              # embeddings → [B, L, D]
-
-        # LSTM returns:
-        # - output: hidden state at each time step → [B, L, H]
-        # - hidden: final hidden state for each layer → [num_layers, B, H]
-        # not used as we only need the last hidden state, but can be useful for debugging
-        output, (hidden, _) = self.lstm(emb)
-
-        # hidden[-1] selects the final hidden state of the top (last) layer 
-        # at the last time step → [B, H]
-        last_hidden = hidden[-1]
-
-        # apply the fully-connected layer to get logits → [B, C]
-        logits = self.fc(last_hidden)
-
-        return logits
-
       
 def train_torch(model, args, train_ds):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
