@@ -27,7 +27,7 @@ import cipherTypeDetection.config as config
 from cipherTypeDetection.cipherStatisticsDataset import CipherStatisticsDataset, PlaintextPathsDatasetParameters, RotorCiphertextsDatasetParameters, calculate_statistics, pad_sequences
 from cipherTypeDetection.predictionPerformanceMetrics import PredictionPerformanceMetrics
 from cipherTypeDetection.rotorDifferentiationEnsemble import RotorDifferentiationEnsemble
-from cipherTypeDetection.ensembleModel import EnsembleModel, ModelMetadata
+from cipherTypeDetection.ensembleModel import EnsembleModel, ModelFile
 from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
 from util.utils import get_model_input_length
 from cipherImplementations.cipher import OUTPUT_ALPHABET, UNKNOWN_SYMBOL_NUMBER
@@ -430,69 +430,43 @@ def load_model(architecture, args, model_path, cipher_types):
     architecture_list = args.architectures
     
     model = None
-
-    if architecture == "FFNN" and model_path.endswith(".pth"):
-        checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
-        
-        model = FFNN(
-            input_size=checkpoint['input_size'],
-            hidden_size=checkpoint['hidden_size'],
-            output_size=checkpoint['output_size'],
-            num_hidden_layers=checkpoint['num_hidden_layers']
-        )
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
-
-        config.FEATURE_ENGINEERING = True
-        config.PAD_INPUT = False
-    elif architecture == "LSTM" and model_path.endswith(".pth"):
-        checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
-        model = LSTM(
-            vocab_size=checkpoint['vocab_size'],
-            embed_dim=checkpoint['embed_dim'],
-            hidden_size=checkpoint['hidden_size'],
-            output_size=checkpoint['output_size'],
-            num_layers=checkpoint['num_layers'],
-            dropout=checkpoint['dropout']
-        )
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.eval()
-
-        config.FEATURE_ENGINEERING = True
-        config.PAD_INPUT = False
-    elif architecture in ("FFNN", "CNN", "LSTM", "Transformer"):
-        if architecture == 'Transformer':
-            if not hasattr(config, "maxlen"):
-                raise ValueError("maxlen must be defined in the config when loading a Transformer model!")
-            model = tf.keras.models.load_model(args.model, custom_objects={
-                'TokenAndPositionEmbedding': TokenAndPositionEmbedding, 
-                'TransformerBlock': TransformerBlock})
-        else:
-            model = tf.keras.models.load_model(args.model)
-        if architecture in ("CNN", "LSTM", "Transformer"):
-            config.FEATURE_ENGINEERING = False
-            config.PAD_INPUT = True
-        else:
-            config.FEATURE_ENGINEERING = True
-            config.PAD_INPUT = False
-        optimizer = Adam(learning_rate=config.learning_rate, beta_1=config.beta_1, beta_2=config.beta_2, epsilon=config.epsilon,
-                         amsgrad=config.amsgrad)
-        model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy",
-                       metrics=["accuracy", SparseTopKCategoricalAccuracy(k=3, name="k3_accuracy")])
+    backend = None
+    if model_path.endswith(".pth"):
+        backend = Backend.PYTORCH
     elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
+        backend = Backend.SCIKIT
+    else:
+        backend = Backend.KERAS
+
+    is_feature_engineering_arch = architecture in ("FFNN", "DT", "NB", "RF", "ET", "SVM", "kNN")
+    is_feature_learning_arch = architecture in ("CNN", "LSTM", "Transformer")
+
+    if is_feature_engineering_arch:
+        model_file = ModelFile(model_path, architecture, backend=backend)
+        model = model_file.load_model()
         config.FEATURE_ENGINEERING = True
         config.PAD_INPUT = False
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
+    elif is_feature_learning_arch:
+        model_file = ModelFile(model_path, architecture, backend=backend)
+        model = model_file.load_model()
+        config.FEATURE_ENGINEERING = False
+        config.PAD_INPUT = True
     elif architecture == 'Ensemble':
         cipher_indices = []
         for cipher_type in cipher_types:
             cipher_indices.append(config.CIPHER_TYPES.index(cipher_type))
-        model_metadata = []
+        model_files = []
         for i, model in enumerate(model_list):
-            metadata = ModelMetadata(model, architecture_list[i], Backend.PYTORCH if model.endswith(".pth") else Backend.KERAS)
-            model_metadata.append(metadata)
-        model = EnsembleModel(model_metadata, strategy, cipher_indices)
+            arch = architecture_list[i]
+            if model.endswith(".pth"):
+                model_backend = Backend.PYTORCH
+            elif arch in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
+                model_backend = Backend.SCIKIT
+            else:
+                model_backend = Backend.KERAS
+            file = ModelFile(model, arch, model_backend)
+            model_files.append(file)
+        model = EnsembleModel(model_files, strategy, cipher_indices)
     else:
         raise ValueError("Unknown architecture: %s" % architecture)
     
@@ -506,12 +480,12 @@ def load_model(architecture, args, model_path, cipher_types):
             raise FileNotFoundError(f"Rotor-only model is required but not found at {rotor_only_model_path}")
         with open(rotor_only_model_path, "rb") as f:
             rotor_only_model = pickle.load(f)
-        return RotorDifferentiationEnsemble(architecture, model, rotor_only_model), "Ensemble"
+        return RotorDifferentiationEnsemble(architecture, model, rotor_only_model), "Ensemble", Backend.KERAS
 
     # If there are no rotor ciphers:
     # - if it’s an ensemble, return the ensemble directly
     # - otherwise return the normal model
-    return model, architecture
+    return model, architecture, backend
 
 
 def expand_cipher_groups(cipher_types):
@@ -688,12 +662,8 @@ def main():
     #         model = load_model()
     # else:
     #     model = load_model()
-    model, architecture = load_model(architecture, args, model_path, cipher_types)
+    model, architecture, backend = load_model(architecture, args, model_path, cipher_types)
     print("Model Loaded.")
-
-    backend = Backend.KERAS
-    if architecture != "Ensemble" and model_path.endswith(".pth"):
-        backend = Backend.PYTORCH
 
     # the program was started as in benchmark mode.
     if args.download_dataset is not None:

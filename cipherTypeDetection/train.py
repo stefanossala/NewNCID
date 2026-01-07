@@ -36,6 +36,7 @@ from tensorflow.keras.metrics import SparseTopKCategoricalAccuracy
 from tensorflow.keras.optimizers import Adam  # , Adamax
 import tensorflow_datasets as tfds
 sys.path.append("../")
+from util.utils import get_pytorch_device
 from cipherTypeDetection.nullDistributionStrategy import NullDistributionStrategy
 import cipherTypeDetection.config as config
 from cipherTypeDetection.trainingBatch import TrainingBatch
@@ -55,7 +56,9 @@ for device in tf.config.list_physical_devices('GPU'):
     tf.config.experimental.set_memory_growth(device, True)
       
 def train_torch(model, args, train_ds, feature_engineering):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_pytorch_device()
+    if device.type == "cpu":
+        print("WARNING: Using CPU for training!")
     model.to(device)
 
     optimizer = optim.Adam(
@@ -103,10 +106,10 @@ def train_torch(model, args, train_ds, feature_engineering):
                     y_train_np = labels
 
                 # Use DataLoader for creating minibatch
-                x_train = torch.tensor(x_train_np, dtype=torch.float32)
+                x_train = torch.tensor(x_train_np, dtype=torch.float32, device=device)
                 if not feature_engineering:
                     x_train = x_train.int()
-                y_train = torch.tensor(y_train_np, dtype=torch.long)
+                y_train = torch.tensor(y_train_np, dtype=torch.long, device=device)
 
                 train_dataset = TensorDataset(x_train, y_train)
                 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
@@ -173,7 +176,10 @@ def train_torch(model, args, train_ds, feature_engineering):
 
 
 def predict_torch(model, args, statistics, labels, feature_engineering):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_pytorch_device()
+    if device.type == "cpu":
+        print("WARNING: Using CPU for prediction!")
+
     model.eval()
     model.to(device)
     criterion = nn.CrossEntropyLoss()
@@ -216,6 +222,8 @@ def print_model_summary(architecture, model, backend, max_train_len):
             summary(model, input_size=(1, max_train_len), dtypes=[torch.long])
         else:
             summary(model, input_size=(1, 724))
+    elif backend == Backend.SCIKIT:
+        print(model)
     else:
         raise ValueError(f"Unknown backend {backend}")
 
@@ -224,31 +232,40 @@ def create_model_with_distribution_strategy(architecture, backend, extend_model,
     print('Creating model...')
 
     strategy = None
-    gpu_count = (len(tf.config.list_physical_devices('GPU')) +
-        len(tf.config.list_physical_devices('XLA_GPU')))
-    if gpu_count > 1:
-        print("Multiple GPUs found.")
-        strategy = tf.distribute.MirroredStrategy()
-        print(f"Number of mirrored devices: {strategy.num_replicas_in_sync}.")
-        with strategy.scope():
+
+    # Skip Keras specific creation of a distribution strategy. For now scikit-learn models
+    # are learned on the CPU and PyTorch models can be trained with upto one GPU.
+    # To support multiple GPUs with PyTorch a bigger reorganization of the codebase 
+    # would be neccessary. The PyTorch `DistributedDataParallel` library needs to launch
+    # multiple, independent instances of the training script.
+    if backend == Backend.PYTORCH or backend == Backend.SCIKIT:
+        return create_model(architecture, extend_model, output_layer_size, max_train_len), strategy
+    else:
+        gpu_count = (len(tf.config.list_physical_devices('GPU')) +
+            len(tf.config.list_physical_devices('XLA_GPU')))
+        if gpu_count > 1:
+            print("Multiple GPUs found.")
+            strategy = tf.distribute.MirroredStrategy()
+            print(f"Number of mirrored devices: {strategy.num_replicas_in_sync}.")
+            with strategy.scope():
+                if extend_model is not None:
+                    extend_model = tf.keras.models.load_model(extend_model, compile=False)
+                model = create_model(architecture, extend_model, output_layer_size, max_train_len)
+            if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
+                print_model_summary(architecture, model, backend, max_train_len)
+
+        else:
+            print("Only one GPU found.")
+            strategy = NullDistributionStrategy()
             if extend_model is not None:
                 extend_model = tf.keras.models.load_model(extend_model, compile=False)
             model = create_model(architecture, extend_model, output_layer_size, max_train_len)
-        if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            print_model_summary(architecture, model, backend, max_train_len)
-
-    else:
-        print("Only one GPU found.")
-        strategy = NullDistributionStrategy()
-        if extend_model is not None:
-            extend_model = tf.keras.models.load_model(extend_model, compile=False)
-        model = create_model(architecture, extend_model, output_layer_size, max_train_len)
-        if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
-            print_model_summary(architecture, model, backend, max_train_len)
+            if architecture in ("FFNN", "CNN", "LSTM", "Transformer") and extend_model is None:
+                print_model_summary(architecture, model, backend, max_train_len)
 
 
-    print('Model created.\n')
-    return model, strategy
+        print('Model created.\n')
+        return model, strategy
 
 def create_model(architecture, extend_model, output_layer_size, max_train_len):
     """
@@ -1258,9 +1275,12 @@ def main():
     architecture = args.architecture
     extend_model = args.extend_model
 
-    backend = Backend.KERAS
     if architecture == "FFNN" or architecture == "LSTM":
         backend = Backend.PYTORCH
+    elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
+        backend = Backend.SCIKIT
+    else:
+        backend = Backend.KERAS
 
     # Validate inputs
     if os.path.splitext(args.model_name)[1] not in ('.h5', '.pth'):
@@ -1316,7 +1336,7 @@ def main():
     architecture, backend, extend_model, output_layer_size=output_layer_size, max_train_len=args.max_train_len)
 
     
-    if backend == Backend.KERAS:
+    if backend == Backend.KERAS or backend == Backend.SCIKIT:
         early_stopping_callback, train_iter, training_stats = train_model(model, strategy, 
                                                                       args, train_ds)
     elif backend == Backend.PYTORCH:

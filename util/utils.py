@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import torch
 
 
 def map_text_into_numberspace(text, alphabet, unknown_symbol_number):
@@ -145,3 +146,15 @@ def print_progress(output_str, file_counter, total_file_count, factor=100):
             output += '.'
         output = output + '] ' + str(file_counter) + '/' + str(total_file_count) + ' (' + str(percentage) + "%)"
         print(output)
+
+def get_pytorch_device():
+    # Will only load the model onto a single CPU / GPU. Using PyTorch DDP
+    # is quite involved and would require a reorganization of the codebase.
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+    elif torch.mps.is_available() and torch.backends.mps.is_built():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    return device

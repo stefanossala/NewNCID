@@ -196,7 +196,8 @@ decay = 1e-8
 drop = 0.1
 
 class Backend(Enum):
-    """Differentiate between the Keras and PyTorch backend for model training."""
+    """Differentiate between the Keras, PyTorch and scikit-learn backend for model training."""
     KERAS = 0
     PYTORCH = 1
+    SCIKIT = 2
 
