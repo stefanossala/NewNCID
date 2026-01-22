@@ -21,7 +21,8 @@ import cipherTypeDetection.config as config
 from cipherTypeDetection.cipherStatisticsDataset import CipherStatisticsDataset, PlaintextPathsDatasetParameters, RotorCiphertextsDatasetParameters, calculate_statistics, pad_sequences
 from cipherTypeDetection.predictionPerformanceMetrics import PredictionPerformanceMetrics
 from cipherTypeDetection.rotorDifferentiationEnsemble import RotorDifferentiationEnsemble
-from cipherTypeDetection.ensembleModel import EnsembleModel, ModelFile
+from cipherTypeDetection.ensembleModel import EnsembleModel
+from cipherTypeDetection.models.model_file import ModelFile
 from util.utils import get_model_input_length
 from cipherImplementations.cipher import OUTPUT_ALPHABET, UNKNOWN_SYMBOL_NUMBER
 from cipherTypeDetection.config import Backend
