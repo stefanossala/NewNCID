@@ -1,15 +1,12 @@
 import multiprocessing
 from pathlib import Path
 import argparse
-import random
 import sys
 import os
 import pickle
 import functools
-import numpy as np
 import time
 from datetime import datetime
-from enum import Enum
 
 import torch
 import torch.nn.functional as F
@@ -18,22 +15,17 @@ import torch.nn.functional as F
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.metrics import SparseTopKCategoricalAccuracy
 sys.path.append("../")
-from util.utils import map_text_into_numberspace
-from util.utils import print_progress
+from util.utils import map_text_into_numberspace, print_progress
 import cipherTypeDetection.config as config
 from cipherTypeDetection.cipherStatisticsDataset import CipherStatisticsDataset, PlaintextPathsDatasetParameters, RotorCiphertextsDatasetParameters, calculate_statistics, pad_sequences
 from cipherTypeDetection.predictionPerformanceMetrics import PredictionPerformanceMetrics
 from cipherTypeDetection.rotorDifferentiationEnsemble import RotorDifferentiationEnsemble
 from cipherTypeDetection.ensembleModel import EnsembleModel, ModelFile
-from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
 from util.utils import get_model_input_length
 from cipherImplementations.cipher import OUTPUT_ALPHABET, UNKNOWN_SYMBOL_NUMBER
 from cipherTypeDetection.config import Backend
-from cipherTypeDetection.models.ffnn import FFNN
-from cipherTypeDetection.models.lstm import LSTM
+from cipherTypeDetection.models.prediction_helper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
 tf.debugging.set_log_device_placement(enabled=False)
 # always flush after print as some architectures like RF need very long time before printing anything.
 print = functools.partial(print, flush=True)
@@ -330,7 +322,6 @@ def evaluate(args, model, architecture):
         avg_test_acc = avg_test_acc / len(results_list)
         print("\n\nAverage evaluation results from %d iterations: avg_test_acc=%f" % (iterations, avg_test_acc))
 
-
 def predict_single_line(args, model, architecture, backend):
     cipher_id_result = ''
     ciphertexts = []
@@ -366,33 +357,18 @@ def predict_single_line(args, model, architecture, backend):
             print("\n")
             continue
         results = None
-        if architecture == "FFNN" and backend == Backend.KERAS:
-            result = model.predict(tf.convert_to_tensor([statistics]), args.batch_size, verbose=0)
-        elif architecture == "FFNN" and backend == Backend.PYTORCH:
-            result = model.predict([statistics], args.batch_size)
-        elif architecture == "LSTM" and backend == Backend.PYTORCH:
-            result = model.predict([ciphertext], args.batch_size)
-        elif architecture in ("CNN", "LSTM", "Transformer"):
-            input_length = get_model_input_length(model, architecture)
-            if len(ciphertext) < input_length:
-                ciphertext = pad_sequences([list(ciphertext)], maxlen=input_length)[0]
-            split_ciphertext = [ciphertext[input_length*j:input_length*(j+1)] for j in range(len(ciphertext) // input_length)]
-            results = []
-            if architecture in ("LSTM", "Transformer"):
-                for ct in split_ciphertext:
-                    results.append(model.predict(tf.convert_to_tensor([ct]), args.batch_size, verbose=0))
-            elif architecture == "CNN":
-                for ct in split_ciphertext:
-                    results.append(
-                        model.predict(tf.reshape(tf.convert_to_tensor([ct]), (1, input_length, 1)), args.batch_size, verbose=0))
-            result = results[0]
-            for res in results[1:]:
-                result = np.add(result, res)
-            result = np.divide(result, len(results))
+        if architecture == "FFNN":
+            result = predict_ffnn(model, [statistics], args.batch_size, backend)
+        elif architecture == "LSTM":
+            result = predict_lstm(model, ciphertext, args.batch_size, backend)
+        elif architecture == "CNN":
+            result = predict_cnn(model, ciphertext, args.batch_size)
+        elif architecture == "Transformer":
+            result = predict_transformer(model, ciphertext, args.batch_size)
         elif architecture in ("DT", "NB", "RF", "ET", "SVM", "kNN"):
             result = model.predict_proba(tf.convert_to_tensor([statistics]))
         elif architecture == "Ensemble":
-            result = model.predict(tf.convert_to_tensor([statistics]), [ciphertext], args.batch_size, verbose=0)
+            result = model.predict([statistics], [ciphertext], args.batch_size, verbose=0)
 
         if isinstance(result, list):
             result_list = list(result[0])
@@ -420,6 +396,9 @@ def predict_single_line(args, model, architecture, backend):
     res_dict = {}
     if len(result) != 0:
         for j, val in enumerate(result[0]):
+            if j >= len(args.ciphers):
+                # Stop in cases where model is trained to predict more classes then are requested
+                break
             res_dict[args.ciphers[j]] = val * 100
     return res_dict
 

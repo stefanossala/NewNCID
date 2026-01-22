@@ -4,14 +4,13 @@ import pickle
 import numpy as np
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.metrics import SparseTopKCategoricalAccuracy
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 import cipherTypeDetection.config as config
 from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
-from cipherImplementations.cipher import OUTPUT_ALPHABET
 from cipherTypeDetection.config import Backend
 from cipherTypeDetection.models.ffnn import FFNN
 from cipherTypeDetection.models.lstm import LSTM
-from util.utils import get_model_input_length, get_pytorch_device
+from cipherTypeDetection.models.prediction_helper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
+from util.utils import get_pytorch_device
 
 
 f1_ffnn = [0.85802469, 0.71601017, 1., 0.99176076, 0.2358263, 0.77622378, 0.70844478, 0.96519285, 0.94650687, 0.85040917, 0.70607827, 0.78005115, 0.84944426, 0.99756839, 0.97485951, 0.95828066, 0.94724363, 0.9211165, 0.99908898, 0.95622688, 0.99787557, 0.74629137, 0.93963723, 0.50773994, 0.95047098, 0.99098016, 0.81281534, 1., 0.99939357, 0.94468614, 0.74026438, 0.80489161, 0.99756691, 0.98346859, 0.96463596, 0.54026417, 0.98918919, 0.2, 0.11942675, 0.14091471, 0.14470678, 0.12706072, 0.99969651, 0.55685131, 0.0059312, 0.99969669, 0.68258591, 0.79946255, 0.49982462, 0.94923858, 0.78894205, 0.8, 0.95987842, 0.87563309, 0.20748299, 0.11743451, 0.04731679, 0.41069723, 0.32477514, 0.11273486, 0.16886064]
@@ -76,7 +75,8 @@ class ModelFile:
             raise ValueError(f"Unknown backend: {self.backend}!")
     
     def _load_pytorch(self):
-        checkpoint = torch.load(self.implementation, map_location=get_pytorch_device())
+        device = get_pytorch_device()
+        checkpoint = torch.load(self.implementation, map_location=device)
         
         if self.architecture == "FFNN":
             model = FFNN(
@@ -99,6 +99,7 @@ class ModelFile:
         
         model.load_state_dict(checkpoint['model_state_dict'])
         model.eval()
+        model.to(device)
         return model
     
     def _load_keras(self):
@@ -177,54 +178,21 @@ class EnsembleModel:
 
     def predict(self, statistics, ciphertexts, batch_size, verbose=0):
         predictions = []
-        for index, metadata in enumerate(self.model_files):
+        for index, model_file in enumerate(self.model_files):
             model = self.models[index]
-            architecture = metadata.architecture
-            if metadata.backend == Backend.PYTORCH:
-                if isinstance(statistics, tf.Tensor):
-                    np_statistics = statistics.numpy()
-                predictions.append(model.predict(np_statistics, batch_size))
-            elif architecture == "FFNN":
-                predictions.append(model.predict(statistics, batch_size=batch_size, verbose=verbose))
-            elif architecture in ("CNN", "LSTM", "Transformer"):
-                input_length = get_model_input_length(model, architecture)
-                if isinstance(ciphertexts, list):
-                    split_ciphertexts = []
-                    for ciphertext in ciphertexts:
-                        if len(ciphertext) < input_length:
-                            ciphertext = pad_sequences([ciphertext], maxlen=input_length, 
-                                                       padding='post', 
-                                                       value=len(OUTPUT_ALPHABET))[0]
-                        split_ciphertexts.append([ciphertext[input_length*j:input_length*(j+1)] for j in range(
-                            len(ciphertext) // input_length)])
-                    split_predictions = []
-                    if architecture in ("LSTM", "Transformer"):
-                        for split_ciphertext in split_ciphertexts:
-                            for ct in split_ciphertext:
-                                split_predictions.append(model.predict(tf.convert_to_tensor([ct]), batch_size=batch_size, verbose=verbose))
-                    elif architecture == "CNN":
-                        for split_ciphertext in split_ciphertexts:
-                            for ct in split_ciphertext:
-                                reshaped_ciphertext = tf.reshape(tf.convert_to_tensor([ct]), 
-                                                                 (1, input_length, 1))
-                                split_predictions.append(model.predict(reshaped_ciphertext,
-                                                     batch_size=batch_size, verbose=0))
-                    combined_prediction = split_predictions[0]
-                    for split_prediction in split_predictions[1:]:
-                        combined_prediction = np.add(combined_prediction, split_prediction)
-                    for j in range(len(combined_prediction)):
-                        combined_prediction[j] /= len(split_predictions)
-                    predictions.append(combined_prediction)
-                else:
-                    if architecture in ("LSTM", "Transformer"):
-                        prediction = model.predict(ciphertexts, batch_size=batch_size, 
-                                                   verbose=verbose)
-                    elif architecture == "CNN":
-                        reshaped_ciphertexts = tf.reshape(ciphertexts, 
-                                                          (len(ciphertexts), input_length, 1))
-                        prediction = model.predict(reshaped_ciphertexts, batch_size=batch_size, 
-                                                   verbose=verbose)
-                    predictions.append(prediction)
+            architecture = model_file.architecture
+            if architecture == "FFNN":
+                prediction = predict_ffnn(model, statistics, batch_size, model_file.backend)
+                predictions.append(prediction)
+            elif architecture == "LSTM":
+                prediction = predict_lstm(model, ciphertexts, batch_size, model_file.backend)
+                predictions.append(prediction)
+            elif architecture == "CNN":
+                prediction = predict_cnn(model, ciphertexts, batch_size)
+                predictions.append(prediction)
+            elif architecture == "Transformer":
+                prediction = predict_transformer(model, ciphertexts, batch_size)
+                predictions.append(prediction)
             elif architecture in ("DT", "NB", "RF", "ET"):
                 predictions.append(model.predict_proba(statistics))
 
