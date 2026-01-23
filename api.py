@@ -18,7 +18,7 @@ import cipherTypeDetection.config as config
 from cipherTypeDetection.rotorDifferentiationEnsemble import RotorDifferentiationEnsemble
 from cipherTypeDetection.transformer import MultiHeadSelfAttention, TransformerBlock, TokenAndPositionEmbedding
 from cipherTypeDetection.ensembleModel import EnsembleModel
-from cipherTypeDetection.models.model_file import ModelFile
+from cipherTypeDetection.models.modelFile import ModelFile
 
 import pandas as pd
 

@@ -3,7 +3,7 @@ from torch.nn import Module
 import cipherTypeDetection.config as config
 from cipherTypeDetection.featureCalculations import calculate_rotor_statistics
 from cipherTypeDetection.config import Backend
-from cipherTypeDetection.models.prediction_helper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
+from cipherTypeDetection.models.predictionHelper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
 
 class RotorDifferentiationEnsemble:
     """

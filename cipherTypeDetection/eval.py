@@ -22,11 +22,11 @@ from cipherTypeDetection.cipherStatisticsDataset import CipherStatisticsDataset,
 from cipherTypeDetection.predictionPerformanceMetrics import PredictionPerformanceMetrics
 from cipherTypeDetection.rotorDifferentiationEnsemble import RotorDifferentiationEnsemble
 from cipherTypeDetection.ensembleModel import EnsembleModel
-from cipherTypeDetection.models.model_file import ModelFile
+from cipherTypeDetection.models.modelFile import ModelFile
 from util.utils import get_model_input_length
 from cipherImplementations.cipher import OUTPUT_ALPHABET, UNKNOWN_SYMBOL_NUMBER
 from cipherTypeDetection.config import Backend
-from cipherTypeDetection.models.prediction_helper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
+from cipherTypeDetection.models.predictionHelper import predict_ffnn, predict_lstm, predict_cnn, predict_transformer
 tf.debugging.set_log_device_placement(enabled=False)
 # always flush after print as some architectures like RF need very long time before printing anything.
 print = functools.partial(print, flush=True)
